@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: smart-traffic-management-system
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /api/health
+    envVars:
+      - key: GOOGLE_MAPS_API_KEY
+        sync: false
