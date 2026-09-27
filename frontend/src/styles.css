@@ -210,3 +210,188 @@ body{overscroll-behavior-y:none;}
   .profile-card{padding:14px;}
   .profile-modern{padding:16px;}
 }
+
+/* V35 MOBILE DESIGN REPAIR — UI ONLY. Existing workflow/logic is unchanged. */
+@media (max-width:720px){
+  html,body,#root,.app,main{width:100%;max-width:100%;overflow-x:hidden;}
+
+  /* Mobile header */
+  header{
+    min-height:64px;
+    height:auto;
+    padding:9px 12px;
+    gap:8px;
+  }
+  header .brand{
+    min-width:0;
+    max-width:58vw;
+    white-space:nowrap;
+    overflow:hidden;
+    text-overflow:ellipsis;
+    font-size:15px;
+    padding:8px 10px;
+  }
+  .top-actions{min-width:0;gap:3px;}
+  .profile-menu-trigger{padding:6px 5px;}
+  .profile-menu-trigger>span:not(.profile-avatar):not(.profile-chevron){display:none;}
+  .ghost{padding:7px 5px;font-size:12px;}
+
+  /* Full mobile page/background */
+  .visual-page{
+    min-height:calc(100svh - 64px);
+    padding:22px 13px 52px;
+    background-attachment:scroll;
+    background-size:cover;
+    background-position:center center;
+  }
+  .visual-page::before{
+    background:linear-gradient(180deg,rgba(245,247,251,.50),rgba(245,247,251,.70));
+  }
+
+  /* Keep cards comfortable on narrow screens */
+  .feature,.route-card,.result,.emergency-card,.profile-card,.google-nav-panel,.route-map,.google-map-box{
+    width:100%;
+    max-width:100%;
+  }
+  .feature{
+    min-width:0;
+    min-height:96px!important;
+  }
+  .feature h3,.feature p{
+    overflow-wrap:anywhere;
+  }
+
+  /* Location/search area: automatic suggestions remain unchanged.
+     The explicit Search button is visually removed because typing already
+     triggers the existing automatic Google Places search. */
+  .searchrow{
+    display:grid;
+    grid-template-columns:minmax(0,1fr) auto;
+    gap:7px;
+    align-items:stretch;
+  }
+  .searchrow input{
+    min-width:0;
+    width:100%;
+  }
+  .searchrow>button.secondary:first-of-type{
+    display:none;
+  }
+  .searchrow>button.secondary:last-child{
+    width:auto;
+    min-width:48px;
+    max-width:145px;
+    padding:10px 10px;
+    white-space:nowrap;
+    font-size:12px;
+  }
+  /* For To Location (no current-location button), keep the input full width. */
+  .searchrow:has(>button.secondary:only-child){
+    grid-template-columns:1fr;
+  }
+
+  .suggestions{
+    left:0;
+    right:0;
+    top:58px;
+    max-height:52svh;
+    border-radius:11px;
+  }
+  .suggestions button{
+    padding:11px 12px;
+  }
+  .loc .selected,.loc .error{
+    overflow-wrap:anywhere;
+  }
+
+  /* Route/results spacing */
+  .action-row{margin-top:10px;}
+  .action-row .primary{width:100%;}
+  .routes-heading{margin-top:20px;}
+  .route-title{gap:8px;align-items:flex-start;}
+  .route-title>div{min-width:0;}
+  .recommended-badge{margin-left:5px;}
+  .stats{gap:7px;}
+  .view-route-btn{width:100%;min-width:0;margin-top:7px;}
+
+  /* Maps become full-width, vertically stacked and touch-friendly. */
+  .route-map,.google-nav-panel,.nearby-map-panel{margin-left:0;margin-right:0;}
+  .google-nav-top{
+    display:flex;
+    flex-direction:column;
+    align-items:stretch;
+    gap:8px;
+  }
+  .google-nav-actions{
+    display:grid;
+    grid-template-columns:1fr 1fr;
+    gap:7px;
+  }
+  .google-nav-actions button{
+    width:100%;
+    min-width:0;
+  }
+  .google-nav-actions button:last-child{
+    grid-column:1 / -1;
+  }
+  .google-nav-map,.nearby-map-panel .google-nav-map{
+    width:100%;
+    height:55svh;
+    min-height:300px;
+    max-height:520px;
+  }
+  .google-nav-info{
+    gap:6px;
+  }
+  .google-nav-info span{
+    max-width:100%;
+    overflow-wrap:anywhere;
+  }
+  .route-map-canvas{
+    width:100%;
+    height:55svh;
+    min-height:300px;
+  }
+
+  /* Dashboard welcome and cards */
+  .dashboard-welcome{padding:4px 1px 0;margin-bottom:18px;}
+  .dashboard-welcome h2{font-size:26px;line-height:1.2;}
+
+  /* Login: use the existing image as a true full-screen mobile backdrop. */
+  .auth-wrap{
+    min-height:100svh;
+    width:100%;
+    padding:18px 12px;
+    background-size:cover;
+    background-position:center center;
+    background-attachment:scroll;
+  }
+  .auth-card{
+    width:min(430px,100%);
+    max-width:100%;
+    padding:24px 17px;
+    border-radius:19px;
+  }
+
+  /* Profile dropdown stays inside the viewport. */
+  .profile-dropdown{
+    right:-4px;
+    width:min(285px,calc(100vw - 24px));
+  }
+}
+
+/* Very narrow phones */
+@media(max-width:390px){
+  header .brand{max-width:48vw;font-size:14px;}
+  .visual-page{padding-left:10px;padding-right:10px;}
+  .searchrow>button.secondary:last-child{
+    min-width:44px;
+    max-width:52px;
+    width:52px;
+    padding:10px 4px;
+    font-size:0;
+  }
+  .searchrow>button.secondary:last-child::first-letter{font-size:16px;}
+  .auth-wrap{padding-left:8px;padding-right:8px;}
+  .auth-card{padding:21px 14px;}
+}
