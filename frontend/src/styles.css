@@ -401,3 +401,115 @@ body{overscroll-behavior-y:none;}
   .emergency-card .call{font-size:17px;padding:10px 20px;}
   .nearby-map-panel .google-nav-actions button{font-size:14px;padding:9px 10px;}
 }
+
+/* FINAL REQUEST — only these two UI changes; all existing workflow/design remains unchanged. */
+/* 1) Hide the explicit Search buttons. Google Places suggestions remain automatic,
+      and Enter-key search behavior remains available in the existing component. */
+.searchrow > button:first-of-type{
+  display:none !important;
+}
+
+/* 2) Keep Use Current Location as a small control at the far right of the location row. */
+.searchrow{
+  display:grid;
+  grid-template-columns:minmax(0,1fr) auto;
+  align-items:stretch;
+  gap:8px;
+}
+.searchrow > input{
+  min-width:0;
+}
+.searchrow > button:last-of-type{
+  width:auto !important;
+  min-width:58px;
+  min-height:48px;
+  padding:10px 14px;
+  white-space:nowrap;
+}
+
+@media(max-width:720px){
+  .searchrow{
+    grid-template-columns:minmax(0,1fr) auto;
+    gap:8px;
+  }
+  .searchrow > button:last-of-type{
+    width:auto !important;
+    min-width:58px;
+    padding:10px 12px;
+    font-size:0;
+  }
+  .searchrow > button:last-of-type::before{
+    content:'📍';
+    font-size:18px;
+    line-height:1;
+  }
+}
+
+/* FINAL MOBILE-ONLY TWEAKS: keep all workflow/design unchanged. */
+/* Search buttons stay hidden; automatic location suggestions and Enter-key search remain unchanged. */
+.searchrow > button:first-of-type{display:none !important;}
+
+/* Use Current Location stays as the small last control in the From Location row. */
+.searchrow{grid-template-columns:minmax(0,1fr) auto !important;}
+.searchrow > button:last-of-type{width:auto !important;min-width:58px !important;max-width:58px !important;}
+
+@media(max-width:720px){
+  /* Smart Route selected map: keep the complete panel inside the route card. */
+  .route-card{
+    min-width:0 !important;
+    max-width:100% !important;
+    overflow:hidden !important;
+  }
+  .route-card .google-nav-panel{
+    width:100% !important;
+    max-width:100% !important;
+    min-width:0 !important;
+    overflow:hidden !important;
+    box-sizing:border-box !important;
+  }
+  .route-card .google-nav-top{
+    width:100% !important;
+    min-width:0 !important;
+    display:block !important;
+  }
+  .route-card .google-nav-top > div:first-child{
+    width:100% !important;
+    min-width:0 !important;
+    overflow-wrap:anywhere;
+  }
+  .route-card .google-nav-actions{
+    width:100% !important;
+    min-width:0 !important;
+    display:flex !important;
+    flex-wrap:wrap !important;
+    gap:8px !important;
+    margin-top:9px !important;
+  }
+  .route-card .google-nav-actions button{
+    flex:1 1 120px !important;
+    min-width:0 !important;
+    max-width:100% !important;
+    white-space:normal !important;
+  }
+  .route-card .google-nav-map{
+    width:100% !important;
+    max-width:100% !important;
+    min-width:0 !important;
+    height:360px !important;
+    box-sizing:border-box !important;
+  }
+  .route-card .google-nav-info{
+    width:100% !important;
+    min-width:0 !important;
+    flex-wrap:wrap !important;
+  }
+  .route-card .google-nav-info span{
+    max-width:100% !important;
+    overflow-wrap:anywhere;
+  }
+  .route-card .route-map-caption{
+    width:100% !important;
+    max-width:100% !important;
+    overflow-wrap:anywhere;
+  }
+}
