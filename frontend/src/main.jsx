@@ -151,6 +151,7 @@ async function getGoogleBrowserRoutes(from,to){
   origin:{lat:Number(from.lat),lng:Number(from.lon)},
   destination:{lat:Number(to.lat),lng:Number(to.lon)},
   travelMode:'DRIVING',
+  routingPreference:'TRAFFIC_AWARE',
   computeAlternativeRoutes:true,
   departureTime:new Date(),
   fields:['path','distanceMeters','duration','staticDuration','routeLabels','viewport']
@@ -207,7 +208,7 @@ function GoogleNavigationMap({route,from,to,onClose}){
       route.path.forEach(p=>bounds.extend(p));
       new window.google.maps.Marker({position:{lat:Number(from.lat),lng:Number(from.lon)},map,label:'A',title:'Start'});
       new window.google.maps.Marker({position:{lat:Number(to.lat),lng:Number(to.lon)},map,label:'B',title:'Destination'});
-      map.fitBounds(bounds,50);setStatus('Selected Google route loaded. Live location is being tracked.');
+      map.fitBounds(bounds,50);setStatus(route.traffic_aware ? 'Selected traffic-aware route loaded. Live location is being tracked.' : 'Selected fallback road route loaded. Live location is being tracked.');
     }else{
       const pts=route?.polyline?decodePolyline(route.polyline,route.polyline_precision||5):[];
       if(!pts.length)throw new Error('This route has no map path to display.');
@@ -215,7 +216,7 @@ function GoogleNavigationMap({route,from,to,onClose}){
       routeLineRef.current=new window.google.maps.Polyline({path,geodesic:true,strokeColor:'#1769e0',strokeOpacity:0.95,strokeWeight:7,map});
       new window.google.maps.Marker({position:{lat:Number(from.lat),lng:Number(from.lon)},map,label:'A',title:'Start'});
       new window.google.maps.Marker({position:{lat:Number(to.lat),lng:Number(to.lon)},map,label:'B',title:'Destination'});
-      map.fitBounds(bounds,50);setStatus('Google Map loaded. Live location is being tracked.');
+      map.fitBounds(bounds,50);setStatus(route.traffic_aware ? 'Traffic-aware route loaded on Google Maps. Live location is being tracked.' : 'Fallback road route loaded on Google Maps. Live location is being tracked.');
     }
     const update=pos=>{const p={lat:pos.coords.latitude,lng:pos.coords.longitude};setLive({lat:p.lat,lon:p.lng,accuracy:Math.round(pos.coords.accuracy)});if(!userMarkerRef.current){userMarkerRef.current=new window.google.maps.Marker({position:p,map,label:'●',title:'Your live location'});}else userMarkerRef.current.setPosition(p);if(follow)map.panTo(p);};
     if(navigator.geolocation)watchRef.current=navigator.geolocation.watchPosition(update,()=>setStatus('Google Map loaded. Live location permission is unavailable.'),{enableHighAccuracy:true,maximumAge:3000,timeout:15000});
@@ -231,40 +232,55 @@ function SmartRoute({nav}){
  const [from,setFrom]=useState(null),[to,setTo]=useState(null),[routes,setRoutes]=useState([]),[msg,setMsg]=useState(''),[busy,setBusy]=useState(false),[activeRoute,setActiveRoute]=useState(null);
  const calculate=async()=>{
   if(!from||!to){setMsg('Please select both source and destination from Google suggestions, or use Current Location for the source.');return}
-  setBusy(true);setRoutes([]);setActiveRoute(null);setMsg('Finding up to 10 distinct real road routes...');
+  setBusy(true);setRoutes([]);setActiveRoute(null);setMsg('Calculating traffic-aware road alternatives...');
   try{
-   let browserRoutes=[];let browserError='';
-   try{const g=await getGoogleBrowserRoutes(from,to);browserRoutes=g.routes||[];}catch(e){browserError=e.message||'Google Maps browser routes unavailable.';}
-
-   let backendRoutes=[];
+   let backendRoutes=[];let backendMeta=null;let backendError='';
    try{
     const r=await fetch(API+'/routes',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({from,to})});
     const d=await r.json();
     if(!r.ok) throw Error(d.error||'Routing failed');
-    backendRoutes=(d.routes||[]).map(r=>({...r,provider:r.provider||'routing-provider'}));
-   }catch(e){if(!browserError)browserError=e.message||'Multi-provider routing unavailable.';}
+    backendMeta=d;
+    backendRoutes=(d.routes||[]).map(r=>{
+      const path=r.path?.length?r.path:(r.polyline?decodePolyline(r.polyline,r.polyline_precision||5).map(([lat,lng])=>({lat,lng})):[]);
+      return {...r,path,provider:r.provider||d.provider||'routing-provider'};
+    });
+   }catch(e){backendError=e.message||'Traffic-aware routing unavailable.';}
 
-   // Combine Google browser routes with the backend Google + Valhalla + OSRM
-   // routes, then remove genuine path duplicates. Never fabricate a route.
-   const combinedRaw=[...browserRoutes,...backendRoutes];
-   const seen=new Set();
-   const combined=[];
-   for(const r of combinedRaw){
-    const path=r.path?.length?r.path:(r.polyline?decodePolyline(r.polyline,r.polyline_precision||5).map(([lat,lng])=>({lat,lng})):[]);
-    const sig=pathSignature(path);
-    if(!sig||seen.has(sig)) continue;
-    seen.add(sig);
-    combined.push({...r,path});
+   // Backend Google result is authoritative. Do not mix Valhalla/OSRM routes
+   // with Google traffic-aware routes, because their traffic semantics differ.
+   const trafficAware=backendMeta?.traffic_aware===true;
+
+   // If REST returned a fallback, first try the browser Google Routes library.
+   // A working Google JS route is preferable because it can still provide
+   // traffic-aware alternatives even when the server-side Routes API call fails.
+   if(!trafficAware){
+    try{
+      const g=await getGoogleBrowserRoutes(from,to);
+      const browserRoutes=(g.routes||[]).map((r,i)=>({...r,id:i+1,recommended:i===0,traffic_aware:true}));
+      if(browserRoutes.length){
+        setRoutes(browserRoutes.slice(0,4));
+        setMsg(`${Math.min(browserRoutes.length,4)} genuine traffic-aware route(s) found from Google Maps. Each route has its own road path and traffic-aware ETA.`);
+        return;
+      }
+    }catch(e){if(!backendError)backendError=e.message||'';}
    }
 
-   combined.sort((a,b)=>Number(b.score||0)-Number(a.score||0));
-   const topRoutes=combined.slice(0,10);
-   topRoutes.forEach((r,i)=>{r.id=i+1;r.recommended=i===0;});
-   setRoutes(topRoutes);
-   if(topRoutes.length){setMsg(`${topRoutes.length} distinct actual route(s) found from real routing providers. Each route below has its own road path.`);}else setMsg(browserError||'No distinct road routes were returned.');
+   if(backendRoutes.length){
+    backendRoutes.sort((a,b)=>Number(b.score||0)-Number(a.score||0));
+    backendRoutes.forEach((r,i)=>{
+      r.id=i+1;
+      r.recommended=i===0;
+      r.traffic_aware=trafficAware;
+    });
+    setRoutes(backendRoutes.slice(0,4));
+    setMsg(`${Math.min(backendRoutes.length,4)} genuine fallback road route(s) found. Live traffic is unavailable, so these are not treated as traffic-aware routes.`);
+    setBusy(false);return;
+   }
+
+   setMsg(backendError||'No distinct traffic-aware road routes were returned. Check the Google Routes API configuration.');
   }catch(e){setMsg(e.message||'Routing failed.')}finally{setBusy(false)}
  };
- return <section className="page visual-page visual-route"><Back nav={nav}/><div className="section-head"><p className="eyebrow">SMART ROUTE</p><h2>Plan your route</h2></div><LocationPicker label="From Location" value={from} onSelect={x=>{setFrom(x);setRoutes([]);setActiveRoute(null)}} placeholder="Search source location..." allowCurrent/><LocationPicker label="To Location" value={to} onSelect={x=>{setTo(x);setRoutes([]);setActiveRoute(null)}} placeholder="Search destination..."/><div className="action-row"><button className="primary" onClick={calculate} disabled={busy}>{busy?'Finding routes...':'Calculate Available Routes'}</button></div>{msg&&<div className="notice">{msg}</div>}{routes.length>0&&<div className="routes-heading"><h3>Available Routes ({routes.length})</h3><span>Distinct actual road paths</span></div>}<div className="route-list">{routes.map(r=><div className={`route-card ${r.recommended?'recommended':''} ${activeRoute?.id===r.id?'selected-route':''}`} key={`${r.provider}-${r.id}`}><div className="route-title"><div><b>Route {r.id}</b>{r.recommended&&<span className="recommended-badge">⭐ RECOMMENDED</span>}</div><span>{r.score}/100</span></div><div className="stats"><span>📏 {r.distance_km} km</span><span>⏱️ {r.duration_min} min</span><span>🚦 {r.traffic}</span><span>⚠️ {r.accidents}</span></div>{r.route_label&&<p className="small">Road: {r.route_label}</p>}<p className="recommendation">{r.recommendation}</p><button type="button" className="secondary view-route-btn" onClick={()=>setActiveRoute(r)}>View Route</button>{activeRoute?.id===r.id&&from&&to&&<GoogleNavigationMap route={r} from={from} to={to} onClose={()=>setActiveRoute(null)}/>}</div>)}</div></section>
+ return <section className="page visual-page visual-route"><Back nav={nav}/><div className="section-head"><p className="eyebrow">SMART ROUTE</p><h2>Plan your route</h2></div><LocationPicker label="From Location" value={from} onSelect={x=>{setFrom(x);setRoutes([]);setActiveRoute(null)}} placeholder="Search source location..." allowCurrent/><LocationPicker label="To Location" value={to} onSelect={x=>{setTo(x);setRoutes([]);setActiveRoute(null)}} placeholder="Search destination..."/><div className="action-row"><button className="primary" onClick={calculate} disabled={busy}>{busy?'Finding routes...':'Calculate Available Routes'}</button></div>{msg&&<div className="notice">{msg}</div>}{routes.length>0&&<div className="routes-heading"><h3>Available Routes ({routes.length})</h3><span>Distinct actual road paths</span></div>}<div className="route-list">{routes.map(r=><div className={`route-card ${r.recommended?'recommended':''} ${activeRoute?.id===r.id?'selected-route':''}`} key={`${r.provider}-${r.id}`}><div className="route-title"><div><b>Route {r.id}</b>{r.recommended&&<span className="recommended-badge">⭐ RECOMMENDED</span>}</div><span>{r.score}/100</span></div><div className="stats"><span>📏 {r.distance_km} km</span><span>⏱️ {r.duration_min} min</span><span>🚦 {r.traffic}</span><span>⚠️ {r.accidents}</span></div>{r.route_label&&<p className="small">Road: {r.route_label}</p>}<p className="recommendation">{r.recommendation}</p>{r.traffic_aware&&<p className="small traffic-source">🚦 Traffic-aware ETA: {r.duration_min} min · Normal ETA: {r.static_duration_min ?? r.duration_min} min{r.traffic_delay_min!=null?` · Delay: +${r.traffic_delay_min} min`:''}</p>}<button type="button" className="secondary view-route-btn" onClick={()=>setActiveRoute(r)}>View Route</button>{activeRoute?.id===r.id&&from&&to&&<GoogleNavigationMap route={r} from={from} to={to} onClose={()=>setActiveRoute(null)}/>}</div>)}</div></section>
 }
 
 function NearbyRouteMap({loc,focus,title,onClose}){
