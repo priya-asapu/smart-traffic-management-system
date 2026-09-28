@@ -407,60 +407,107 @@ def routes():
         return jsonify({'error':'Source and destination are required.'}),400
 
     google_error = None
-    all_candidates = []
 
-    def add_candidate(route):
-        """Add a real route and reject exact/sampled-path duplicates."""
-        path = route.get('path') or []
-        if not path and route.get('polyline'):
-            path = decode_polyline_backend(route['polyline'], route.get('polyline_precision', 5))
-        if len(path) < 2:
-            return
-        route['path'] = path
-        sig = path_signature_backend(path)
-        if not sig:
-            return
-        if any(sig == x['_path_signature'] for x in all_candidates):
-            return
-        route['_path_signature'] = sig
-        all_candidates.append(route)
-
-    # 1) Google Routes API — up to 4 genuine routes.
+    # Smart Route is intentionally traffic-first. If Google Routes API succeeds,
+    # ONLY its traffic-aware alternatives are returned. Free OSM providers are
+    # fallback road routing only and are never mixed into a traffic-aware result.
     if GOOGLE_MAPS_API_KEY:
         try:
             now=datetime.datetime.now(datetime.timezone.utc).isoformat().replace('+00:00','Z')
             body={
                 'origin':{'location':{'latLng':{'latitude':float(a['lat']),'longitude':float(a['lon'])}}},
                 'destination':{'location':{'latLng':{'latitude':float(b['lat']),'longitude':float(b['lon'])}}},
-                'travelMode':'DRIVE','routingPreference':'TRAFFIC_AWARE',
-                'computeAlternativeRoutes':True,'departureTime':now,
-                'languageCode':'en-US','units':'METRIC'
+                'travelMode':'DRIVE',
+                'routingPreference':'TRAFFIC_AWARE',
+                'computeAlternativeRoutes':True,
+                'departureTime':now,
+                'languageCode':'en-US',
+                'units':'METRIC'
             }
-            fieldmask=','.join(['routes.distanceMeters','routes.duration','routes.staticDuration','routes.routeLabels','routes.polyline.encodedPolyline'])
+            fieldmask=','.join([
+                'routes.distanceMeters','routes.duration','routes.staticDuration',
+                'routes.routeLabels','routes.polyline.encodedPolyline','routes.description'
+            ])
             r=requests.post(GOOGLE_ROUTES,json=body,headers={
-                'Content-Type':'application/json','X-Goog-Api-Key':GOOGLE_MAPS_API_KEY,'X-Goog-FieldMask':fieldmask
-            },timeout=12)
+                'Content-Type':'application/json',
+                'X-Goog-Api-Key':GOOGLE_MAPS_API_KEY,
+                'X-Goog-FieldMask':fieldmask
+            },timeout=15)
             if r.ok:
-                for x in r.json().get('routes',[]):
-                    dist=float(x.get('distanceMeters',0)); dur=parse_duration(x.get('duration','0s')); static=parse_duration(x.get('staticDuration','0s'))
+                raw=r.json().get('routes',[])
+                candidates=[]; seen=set()
+                for i,x in enumerate(raw):
+                    dist=float(x.get('distanceMeters',0))
+                    dur=parse_duration(x.get('duration','0s'))
+                    static=parse_duration(x.get('staticDuration','0s'))
                     poly=((x.get('polyline') or {}).get('encodedPolyline'))
-                    if not poly or not dist: continue
-                    add_candidate({
-                        'distance_km':round(dist/1000,2),'duration_min':round(dur/60,1),
-                        'traffic':_traffic_label(dur,static),'accidents':'No verified accident feed connected',
-                        'route_label':(x.get('routeLabels') or ['Google road route'])[0],
-                        'polyline':poly,'polyline_precision':5,'provider':'google',
-                        '_metrics':{'distance':dist,'duration':dur,'static':static}
+                    if not poly or dist <= 0 or dur <= 0:
+                        continue
+                    path=decode_polyline_backend(poly,5)
+                    sig=path_signature_backend(path)
+                    if not sig or sig in seen:
+                        continue
+                    seen.add(sig)
+                    delay=max(0.0,dur-static)
+                    traffic=_traffic_label(dur,static)
+                    # Google traffic-aware duration is the ETA used for the route.
+                    # Score favors lower traffic ETA and lower delay, not provider name.
+                    metrics={'distance':dist,'duration':dur,'static':static}
+                    score=_route_score({'_metrics':metrics})
+                    candidates.append({
+                        'id':i+1,
+                        'route_index':i,
+                        'distance_km':round(dist/1000,2),
+                        'duration_min':round(dur/60,1),
+                        'static_duration_min':round(static/60,1),
+                        'traffic_delay_min':round(delay/60,1),
+                        'traffic':traffic,
+                        'traffic_aware':True,
+                        'accidents':'No verified accident feed connected',
+                        'route_label':(x.get('routeLabels') or ['Google traffic-aware route'])[0],
+                        'description':x.get('description') or '',
+                        'polyline':poly,
+                        'polyline_precision':5,
+                        'path':path,
+                        'provider':'google_traffic_aware',
+                        'score':score,
+                        'recommended':False,
+                        'recommendation':'Traffic-aware route. ETA includes current traffic conditions.'
                     })
+
+                if candidates:
+                    candidates.sort(key=lambda x:(-float(x['score']),float(x['duration_min']),float(x['distance_km'])))
+                    for idx,c in enumerate(candidates,1):
+                        c['id']=idx
+                        c['recommended']=idx==1
+                        c['recommendation']=(
+                            'Recommended using traffic-aware ETA, traffic delay and actual road distance.'
+                            if idx==1 else
+                            'Alternative traffic-aware road route returned by Google.'
+                        )
+                    return jsonify({
+                        'routes':candidates[:4],
+                        'source':'Google Routes API — traffic aware',
+                        'provider':'google_traffic_aware',
+                        'traffic_aware':True,
+                        'max_provider_routes':4,
+                        'note':'Google can return the default route plus up to three genuine alternatives. Fewer routes are normal when the road network does not provide more distinct alternatives.'
+                    })
+                google_error='Google Routes API returned no usable traffic-aware route.'
             else:
-                try: google_error=r.json().get('error',{}).get('message') or r.text[:500]
-                except Exception: google_error=r.text[:500]
+                try:
+                    google_error=r.json().get('error',{}).get('message') or r.text[:500]
+                except Exception:
+                    google_error=r.text[:500]
         except Exception as e:
             google_error=str(e)
     else:
         google_error='Google Maps API key is not configured.'
 
-    # 2) Valhalla — up to 3 genuine alternatives.
+    # Fallback mode: real road geometry only. Do not call this traffic data.
+    # This keeps the demo honest when Google traffic routing is unavailable.
+    fallback_candidates=[]
+
     try:
         vbody={
             'locations':[{'lat':float(a['lat']),'lon':float(a['lon'])},{'lat':float(b['lat']),'lon':float(b['lon'])}],
@@ -473,61 +520,74 @@ def routes():
             for alt in (vd.get('alternates') or []):
                 trip=alt.get('trip') if isinstance(alt,dict) and alt.get('trip') else alt
                 if isinstance(trip,dict): trips.append(trip)
+            seen=set()
             for trip in trips:
                 summary=trip.get('summary') or {}; legs=trip.get('legs') or []
                 shape=''.join((leg.get('shape') or '') for leg in legs)
                 if not shape or not summary.get('length'): continue
+                path=decode_polyline_backend(shape,6); sig=path_signature_backend(path)
+                if not sig or sig in seen: continue
+                seen.add(sig)
                 dist=float(summary.get('length',0))*1000; dur=float(summary.get('time',0))
-                add_candidate({
+                fallback_candidates.append({
                     'distance_km':round(dist/1000,2),'duration_min':round(dur/60,1),
-                    'traffic':'Live traffic unavailable (Valhalla fallback)','accidents':'No verified accident feed connected',
-                    'route_label':'Valhalla road route','polyline':shape,'polyline_precision':6,'provider':'valhalla',
+                    'traffic':'Traffic unavailable — fallback routing','traffic_aware':False,
+                    'traffic_delay_min':None,
+                    'accidents':'No verified accident feed connected',
+                    'route_label':'Valhalla road route (fallback)',
+                    'polyline':shape,'polyline_precision':6,'path':path,'provider':'valhalla_fallback',
                     '_metrics':{'distance':dist,'duration':dur,'static':dur}
                 })
     except Exception:
         pass
 
-    # 3) OSRM — up to 3 genuine alternatives.
-    try:
-        coords=f"{float(a['lon'])},{float(a['lat'])};{float(b['lon'])},{float(b['lat'])}"
-        rr=requests.get(OSRM+'/'+coords,params={'overview':'full','alternatives':3,'steps':'false','geometries':'polyline'},headers=HEADERS,timeout=15)
-        rr.raise_for_status()
-        for x in rr.json().get('routes',[]):
-            dist=float(x.get('distance',0)); dur=float(x.get('duration',0)); poly=x.get('geometry')
-            if not poly or not dist: continue
-            add_candidate({
-                'distance_km':round(dist/1000,2),'duration_min':round(dur/60,1),
-                'traffic':'Live traffic unavailable (OSRM fallback)','accidents':'No verified accident feed connected',
-                'route_label':'OSRM road route','polyline':poly,'polyline_precision':5,'provider':'osrm',
-                '_metrics':{'distance':dist,'duration':dur,'static':dur}
-            })
-    except Exception:
-        pass
+    if not fallback_candidates:
+        try:
+            coords=f"{float(a['lon'])},{float(a['lat'])};{float(b['lon'])},{float(b['lat'])}"
+            rr=requests.get(OSRM+'/'+coords,params={'overview':'full','alternatives':3,'steps':'false','geometries':'polyline'},headers=HEADERS,timeout=15)
+            rr.raise_for_status()
+            seen=set()
+            for x in rr.json().get('routes',[]):
+                dist=float(x.get('distance',0)); dur=float(x.get('duration',0)); poly=x.get('geometry')
+                if not poly or dist <= 0: continue
+                path=decode_polyline_backend(poly,5); sig=path_signature_backend(path)
+                if not sig or sig in seen: continue
+                seen.add(sig)
+                fallback_candidates.append({
+                    'distance_km':round(dist/1000,2),'duration_min':round(dur/60,1),
+                    'traffic':'Traffic unavailable — fallback routing','traffic_aware':False,
+                    'traffic_delay_min':None,
+                    'accidents':'No verified accident feed connected',
+                    'route_label':'OSRM road route (fallback)',
+                    'polyline':poly,'polyline_precision':5,'path':path,'provider':'osrm_fallback',
+                    '_metrics':{'distance':dist,'duration':dur,'static':dur}
+                })
+        except Exception:
+            pass
 
-    if not all_candidates:
+    if not fallback_candidates:
         return jsonify({'error':'No road route was returned by the available routing providers.','details':google_error}),502
 
-    for c in all_candidates:
-        metrics=c.get('_metrics',{})
-        dist=float(metrics.get('distance',c.get('distance_km',0)*1000))
-        dur=float(metrics.get('duration',c.get('duration_min',0)*60))
-        static=float(metrics.get('static',dur))
-        c['score']=_route_score({'_metrics':{'distance':dist,'duration':dur,'static':static}})
+    for c in fallback_candidates:
+        c['score']=_route_score({'_metrics':c['_metrics']})
         c.pop('_metrics',None)
+        c['recommended']=False
+        c['recommendation']='Fallback road route only. Live traffic data was unavailable for this calculation.'
+    fallback_candidates.sort(key=lambda x:(-float(x['score']),float(x['duration_min']),float(x['distance_km'])))
+    for idx,c in enumerate(fallback_candidates[:4],1):
+        c['id']=idx
+        c['recommended']=idx==1
+        if idx==1:
+            c['recommendation']='Best available fallback road route by actual distance and travel time. Live traffic is unavailable.'
 
-    all_candidates.sort(key=lambda x:(-float(x.get('score',0)),float(x.get('duration_min',0)),float(x.get('distance_km',0))))
-    all_candidates=all_candidates[:10]
-    for idx,c in enumerate(all_candidates,1):
-        c['id']=idx; c['recommended']=idx==1
-        c['recommendation']='Recommended based on actual distance, travel time and available traffic data.' if idx==1 else 'Alternative actual road route returned by a routing provider.'
-        c.pop('_path_signature',None)
-
-    provider_counts={}
-    for c in all_candidates: provider_counts[c['provider']]=provider_counts.get(c['provider'],0)+1
     return jsonify({
-        'routes':all_candidates,'source':'Google Routes API + Valhalla + OSRM',
-        'provider_counts':provider_counts,'max_routes':10,'google_error':google_error,
-        'note':'Up to 10 distinct genuine road routes are collected from multiple real routing providers. The app never fabricates or duplicates a route; fewer than 10 are returned when fewer distinct road paths are available.'
+        'routes':fallback_candidates[:4],
+        'source':'OpenStreetMap fallback routing',
+        'provider':fallback_candidates[0]['provider'],
+        'traffic_aware':False,
+        'max_provider_routes':4,
+        'google_error':google_error,
+        'note':'Google traffic-aware routing was unavailable, so real road fallback routes are shown. They must not be interpreted as live traffic routes.'
     })
 
 
