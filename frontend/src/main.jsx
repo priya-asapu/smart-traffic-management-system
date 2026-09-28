@@ -231,22 +231,37 @@ function SmartRoute({nav}){
  const [from,setFrom]=useState(null),[to,setTo]=useState(null),[routes,setRoutes]=useState([]),[msg,setMsg]=useState(''),[busy,setBusy]=useState(false),[activeRoute,setActiveRoute]=useState(null);
  const calculate=async()=>{
   if(!from||!to){setMsg('Please select both source and destination from Google suggestions, or use Current Location for the source.');return}
-  setBusy(true);setRoutes([]);setActiveRoute(null);setMsg('Finding distinct Google road alternatives...');
+  setBusy(true);setRoutes([]);setActiveRoute(null);setMsg('Finding up to 10 distinct real road routes...');
   try{
-   let googleRoutes=[];let browserError='';
-   try{const g=await getGoogleBrowserRoutes(from,to);googleRoutes=g.routes||[];}catch(e){browserError=e.message||'Google Maps route alternatives unavailable.';}
-   let fallback=[];
-   if(googleRoutes.length<4){
-    try{const r=await fetch(API+'/routes',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({from,to})});const d=await r.json();if(r.ok)fallback=d.routes||[];else throw Error(d.error||'Routing failed');
-     const seen=new Set(googleRoutes.map(r=>pathSignature(r.path||[])));
-     fallback=fallback.filter(r=>{const p=r.polyline?decodePolyline(r.polyline,r.polyline_precision||5).map(([lat,lng])=>({lat,lng})):[];const sig=pathSignature(p);if(!sig||seen.has(sig))return false;seen.add(sig);return true;});
-     fallback=fallback.map(r=>({...r,provider:r.provider||'fallback'}));
-    }catch(e){if(!browserError)browserError=e.message;}
+   let browserRoutes=[];let browserError='';
+   try{const g=await getGoogleBrowserRoutes(from,to);browserRoutes=g.routes||[];}catch(e){browserError=e.message||'Google Maps browser routes unavailable.';}
+
+   let backendRoutes=[];
+   try{
+    const r=await fetch(API+'/routes',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({from,to})});
+    const d=await r.json();
+    if(!r.ok) throw Error(d.error||'Routing failed');
+    backendRoutes=(d.routes||[]).map(r=>({...r,provider:r.provider||'routing-provider'}));
+   }catch(e){if(!browserError)browserError=e.message||'Multi-provider routing unavailable.';}
+
+   // Combine Google browser routes with the backend Google + Valhalla + OSRM
+   // routes, then remove genuine path duplicates. Never fabricate a route.
+   const combinedRaw=[...browserRoutes,...backendRoutes];
+   const seen=new Set();
+   const combined=[];
+   for(const r of combinedRaw){
+    const path=r.path?.length?r.path:(r.polyline?decodePolyline(r.polyline,r.polyline_precision||5).map(([lat,lng])=>({lat,lng})):[]);
+    const sig=pathSignature(path);
+    if(!sig||seen.has(sig)) continue;
+    seen.add(sig);
+    combined.push({...r,path});
    }
-   const combined=[...googleRoutes,...fallback].slice(0,4);
-   combined.sort((a,b)=>Number(b.score||0)-Number(a.score||0)).forEach((r,i)=>{r.id=i+1;r.recommended=i===0;});
-   setRoutes(combined);
-   if(combined.length){setMsg(`${combined.length} distinct actual route(s) found. Each route below has its own road path.`);}else setMsg(browserError||'No distinct road routes were returned.');
+
+   combined.sort((a,b)=>Number(b.score||0)-Number(a.score||0));
+   const topRoutes=combined.slice(0,10);
+   topRoutes.forEach((r,i)=>{r.id=i+1;r.recommended=i===0;});
+   setRoutes(topRoutes);
+   if(topRoutes.length){setMsg(`${topRoutes.length} distinct actual route(s) found from real routing providers. Each route below has its own road path.`);}else setMsg(browserError||'No distinct road routes were returned.');
   }catch(e){setMsg(e.message||'Routing failed.')}finally{setBusy(false)}
  };
  return <section className="page visual-page visual-route"><Back nav={nav}/><div className="section-head"><p className="eyebrow">SMART ROUTE</p><h2>Plan your route</h2></div><LocationPicker label="From Location" value={from} onSelect={x=>{setFrom(x);setRoutes([]);setActiveRoute(null)}} placeholder="Search source location..." allowCurrent/><LocationPicker label="To Location" value={to} onSelect={x=>{setTo(x);setRoutes([]);setActiveRoute(null)}} placeholder="Search destination..."/><div className="action-row"><button className="primary" onClick={calculate} disabled={busy}>{busy?'Finding routes...':'Calculate Available Routes'}</button></div>{msg&&<div className="notice">{msg}</div>}{routes.length>0&&<div className="routes-heading"><h3>Available Routes ({routes.length})</h3><span>Distinct actual road paths</span></div>}<div className="route-list">{routes.map(r=><div className={`route-card ${r.recommended?'recommended':''} ${activeRoute?.id===r.id?'selected-route':''}`} key={`${r.provider}-${r.id}`}><div className="route-title"><div><b>Route {r.id}</b>{r.recommended&&<span className="recommended-badge">⭐ RECOMMENDED</span>}</div><span>{r.score}/100</span></div><div className="stats"><span>📏 {r.distance_km} km</span><span>⏱️ {r.duration_min} min</span><span>🚦 {r.traffic}</span><span>⚠️ {r.accidents}</span></div>{r.route_label&&<p className="small">Road: {r.route_label}</p>}<p className="recommendation">{r.recommendation}</p><button type="button" className="secondary view-route-btn" onClick={()=>setActiveRoute(r)}>View Route</button>{activeRoute?.id===r.id&&from&&to&&<GoogleNavigationMap route={r} from={from} to={to} onClose={()=>setActiveRoute(null)}/>}</div>)}</div></section>
