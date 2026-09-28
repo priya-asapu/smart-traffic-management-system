@@ -63,34 +63,35 @@ def close_db(_):
 def init_db():
     con = sqlite3.connect(DB)
     con.execute('''CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL, address TEXT DEFAULT '', phone TEXT DEFAULT '', created_at TEXT DEFAULT CURRENT_TIMESTAMP)''')
+    con.execute('''CREATE TABLE IF NOT EXISTS sessions(token TEXT PRIMARY KEY, user_id INTEGER NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE)''')
     cols={r[1] for r in con.execute('PRAGMA table_info(users)').fetchall()}
     if 'address' not in cols: con.execute("ALTER TABLE users ADD COLUMN address TEXT DEFAULT ''")
     if 'phone' not in cols: con.execute("ALTER TABLE users ADD COLUMN phone TEXT DEFAULT ''")
-    con.execute('''CREATE TABLE IF NOT EXISTS sessions(token TEXT PRIMARY KEY, user_id INTEGER NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE)''')
     con.commit(); con.close()
+
+# Initialize/migrate the database when Flask is imported (Gunicorn/Render).
+init_db()
 
 def hash_pw(p): return hashlib.sha256(p.encode()).hexdigest()
 def token_for(uid): return secrets.token_urlsafe(32)
-
-def ensure_db():
-    # Gunicorn imports this module directly, so initialize/migrate the database here too.
-    init_db()
-
-ensure_db()
+SESSIONS = {}  # kept only for backward compatibility with older running processes
 
 def auth(f):
     @wraps(f)
     def wrapper(*args, **kwargs):
         t = request.headers.get('Authorization','').replace('Bearer ','').strip()
         if not t: return jsonify({'error':'Unauthorized'}), 401
-        row=db().execute('SELECT user_id FROM sessions WHERE token=?',(t,)).fetchone()
-        if not row: return jsonify({'error':'Unauthorized'}), 401
-        user=db().execute('SELECT id FROM users WHERE id=?',(row['user_id'],)).fetchone()
+        # Sessions are stored in SQLite so logout/login works reliably across
+        # refreshes, Render restarts and different devices.
+        row = db().execute('SELECT user_id FROM sessions WHERE token=?',(t,)).fetchone()
+        if not row:
+            return jsonify({'error':'Unauthorized'}), 401
+        user = db().execute('SELECT id FROM users WHERE id=?',(row['user_id'],)).fetchone()
         if not user:
             db().execute('DELETE FROM sessions WHERE token=?',(t,)); db().commit()
             return jsonify({'error':'Unauthorized'}), 401
         request.user_id = row['user_id']
-        request.session_token = t
+        request.auth_token = t
         return f(*args, **kwargs)
     return wrapper
 
@@ -118,7 +119,11 @@ def login():
     d=request.json or {}; u=(d.get('username') or '').strip(); p=d.get('password') or ''
     row=db().execute('SELECT * FROM users WHERE username=?',(u,)).fetchone()
     if not row or row['password_hash']!=hash_pw(p): return jsonify({'error':'Invalid username or password.'}),401
-    t=token_for(row['id']); db().execute('INSERT INTO sessions(token,user_id) VALUES(?,?)',(t,row['id'])); db().commit(); return jsonify({'token':t,'username':u})
+    t=token_for(row['id'])
+    db().execute('INSERT INTO sessions(token,user_id) VALUES(?,?)',(t,row['id']))
+    db().commit()
+    SESSIONS[t]=row['id']
+    return jsonify({'token':t,'username':row['username']})
 
 @app.post('/api/auth/reset')
 def reset():
@@ -164,8 +169,10 @@ def delete_profile():
     if p!=cp: return jsonify({'error':'Passwords do not match.'}),400
     r=db().execute('SELECT password_hash FROM users WHERE id=?',(request.user_id,)).fetchone()
     if not r or r['password_hash']!=hash_pw(p): return jsonify({'error':'Current password is incorrect.'}),401
-    db().execute('DELETE FROM sessions WHERE user_id=?',(request.user_id,))
     db().execute('DELETE FROM users WHERE id=?',(request.user_id,)); db().commit()
+    db().execute('DELETE FROM sessions WHERE user_id=?',(request.user_id,)); db().commit()
+    for k,v in list(SESSIONS.items()):
+        if v==request.user_id: del SESSIONS[k]
     return jsonify({'message':'Account deleted.'})
 
 @app.post('/api/google/autocomplete')
@@ -609,7 +616,11 @@ def frontend(path):
 @app.post('/api/logout')
 @auth
 def logout():
-    t=request.headers.get('Authorization','').replace('Bearer ','').strip(); db().execute('DELETE FROM sessions WHERE token=?',(t,)); db().commit(); return jsonify({'message':'Logged out'})
+    t=request.headers.get('Authorization','').replace('Bearer ','').strip()
+    if t:
+        db().execute('DELETE FROM sessions WHERE token=?',(t,)); db().commit()
+        SESSIONS.pop(t,None)
+    return jsonify({'message':'Logged out'})
 
 if __name__=='__main__':
-    app.run(host='0.0.0.0',port=int(os.environ.get('PORT',10000)),debug=False)
+    init_db(); app.run(host='0.0.0.0',port=int(os.environ.get('PORT',10000)),debug=False)
