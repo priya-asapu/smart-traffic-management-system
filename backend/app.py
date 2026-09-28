@@ -403,190 +403,168 @@ def _route_score(route):
 @app.post('/api/routes')
 def routes():
     d=request.json or {}; a=d.get('from'); b=d.get('to')
-    if not a or not b: return jsonify({'error':'Source and destination are required.'}),400
-    try:
-        # Prefer Google Routes API because it can provide traffic-aware routes.
-        # If the demo/restricted key cannot call Routes API, fall back to OSRM
-        # so the application still returns real road routes rather than fake data.
-        google_error = None
-        if GOOGLE_MAPS_API_KEY:
-            try:
-                now=datetime.datetime.now(datetime.timezone.utc).isoformat().replace('+00:00','Z')
-                body={
-                    'origin':{'location':{'latLng':{'latitude':float(a['lat']),'longitude':float(a['lon'])}}},
-                    'destination':{'location':{'latLng':{'latitude':float(b['lat']),'longitude':float(b['lon'])}}},
-                    'travelMode':'DRIVE',
-                    'routingPreference':'TRAFFIC_AWARE',
-                    'computeAlternativeRoutes':True,
-                    'departureTime':now,
-                    'languageCode':'en-US',
-                    'units':'METRIC'
-                }
-                fieldmask=','.join([
-                    'routes.distanceMeters','routes.duration','routes.staticDuration',
-                    'routes.routeLabels','routes.polyline.encodedPolyline'
-                ])
-                r=requests.post(GOOGLE_ROUTES,json=body,headers={
-                    'Content-Type':'application/json',
-                    'X-Goog-Api-Key':GOOGLE_MAPS_API_KEY,
-                    'X-Goog-FieldMask':fieldmask
-                },timeout=12)
-                if r.ok:
-                    data=r.json(); raw=data.get('routes',[])
-                    if raw:
-                        candidates=[]
-                        for i,x in enumerate(raw):
-                            dist=float(x.get('distanceMeters',0)); dur=parse_duration(x.get('duration','0s')); static=parse_duration(x.get('staticDuration','0s'))
-                            candidates.append({
-                                'id':i+1,
-                                'distance_km':round(dist/1000,2),
-                                'duration_min':round(dur/60,1),
-                                'traffic':_traffic_label(dur,static),
-                                'accidents':'No verified accident feed connected',
-                                'route_label':(x.get('routeLabels') or ['ROUTE'])[0],
-                                'polyline':((x.get('polyline') or {}).get('encodedPolyline')),
-                                '_metrics':{'distance':dist,'duration':dur,'static':static}
-                            })
-                        for c in candidates: c['score']=_route_score(c); c.pop('_metrics',None)
-                        candidates.sort(key=lambda x:x['score'],reverse=True)
-                        for idx,c in enumerate(candidates,1):
-                            c['id']=idx; c['recommended']=idx==1
-                            c['recommendation']='Recommended for this trip based on distance, travel time and traffic data.' if idx==1 else 'Alternative route.'
-                        return jsonify({
-                            'routes':candidates,
-                            'source':'Google Routes API (New)',
-                            'provider':'google',
-                            'max_provider_routes':4,
-                            'note':'Google Routes API returns the default route plus up to three alternatives when available. Accident data is not fabricated when no verified feed is connected.'
-                        })
-                    google_error='Google returned no routes.'
-                else:
-                    try: google_error=r.json().get('error',{}).get('message') or r.text[:500]
-                    except Exception: google_error=r.text[:500]
-            except Exception as e:
-                google_error=str(e)
-        else:
-            google_error='Google Maps API key is not configured.'
+    if not a or not b:
+        return jsonify({'error':'Source and destination are required.'}),400
 
-        # First free fallback: Valhalla public routing service. It can return the
-        # primary route plus up to three actual alternatives when the road network
-        # supports them. No fake routes are generated.
+    google_error = None
+    all_candidates = []
+
+    def add_candidate(route):
+        """Add a real route and reject exact/sampled-path duplicates."""
+        path = route.get('path') or []
+        if not path and route.get('polyline'):
+            path = decode_polyline_backend(route['polyline'], route.get('polyline_precision', 5))
+        if len(path) < 2:
+            return
+        route['path'] = path
+        sig = path_signature_backend(path)
+        if not sig:
+            return
+        if any(sig == x['_path_signature'] for x in all_candidates):
+            return
+        route['_path_signature'] = sig
+        all_candidates.append(route)
+
+    # 1) Google Routes API — up to 4 genuine routes.
+    if GOOGLE_MAPS_API_KEY:
         try:
-            vbody={
-                'locations':[
-                    {'lat':float(a['lat']),'lon':float(a['lon'])},
-                    {'lat':float(b['lat']),'lon':float(b['lon'])}
-                ],
-                'costing':'auto',
-                'alternates':3,
-                'units':'kilometers',
-                'language':'en-US',
-                'directions_type':'instructions'
+            now=datetime.datetime.now(datetime.timezone.utc).isoformat().replace('+00:00','Z')
+            body={
+                'origin':{'location':{'latLng':{'latitude':float(a['lat']),'longitude':float(a['lon'])}}},
+                'destination':{'location':{'latLng':{'latitude':float(b['lat']),'longitude':float(b['lon'])}}},
+                'travelMode':'DRIVE','routingPreference':'TRAFFIC_AWARE',
+                'computeAlternativeRoutes':True,'departureTime':now,
+                'languageCode':'en-US','units':'METRIC'
             }
-            vr=requests.post(VALHALLA,json=vbody,headers={**HEADERS,'X-Client-Id':'smart-traffic-management-system'},timeout=18)
-            if vr.ok:
-                vd=vr.json()
-                trips=[]
-                if vd.get('trip'): trips.append(vd['trip'])
-                for alt in (vd.get('alternates') or []):
-                    trip=alt.get('trip') if isinstance(alt,dict) and alt.get('trip') else alt
-                    if isinstance(trip,dict): trips.append(trip)
-                candidates=[]
-                for i,trip in enumerate(trips):
-                    summary=trip.get('summary') or {}
-                    legs=trip.get('legs') or []
-                    shape=''.join((leg.get('shape') or '') for leg in legs)
-                    if not shape or not summary.get('length'):
-                        continue
-                    candidates.append({
-                        'id':i+1,
-                        'distance_km':round(float(summary.get('length',0)),2),
-                        'duration_min':round(float(summary.get('time',0))/60,1),
-                        'traffic':'Live traffic unavailable (Valhalla fallback)',
-                        'accidents':'No verified accident feed connected',
-                        'route_label':'Valhalla road route',
-                        'polyline':shape,
-                        'polyline_precision':6,
-                        '_metrics':{'distance':float(summary.get('length',0))*1000,'duration':float(summary.get('time',0))}
+            fieldmask=','.join(['routes.distanceMeters','routes.duration','routes.staticDuration','routes.routeLabels','routes.polyline.encodedPolyline'])
+            r=requests.post(GOOGLE_ROUTES,json=body,headers={
+                'Content-Type':'application/json','X-Goog-Api-Key':GOOGLE_MAPS_API_KEY,'X-Goog-FieldMask':fieldmask
+            },timeout=12)
+            if r.ok:
+                for x in r.json().get('routes',[]):
+                    dist=float(x.get('distanceMeters',0)); dur=parse_duration(x.get('duration','0s')); static=parse_duration(x.get('staticDuration','0s'))
+                    poly=((x.get('polyline') or {}).get('encodedPolyline'))
+                    if not poly or not dist: continue
+                    add_candidate({
+                        'distance_km':round(dist/1000,2),'duration_min':round(dur/60,1),
+                        'traffic':_traffic_label(dur,static),'accidents':'No verified accident feed connected',
+                        'route_label':(x.get('routeLabels') or ['Google road route'])[0],
+                        'polyline':poly,'polyline_precision':5,'provider':'google',
+                        '_metrics':{'distance':dist,'duration':dur,'static':static}
                     })
-                # Remove duplicate shapes while preserving provider order.
-                unique=[]; seen_shapes=set()
-                for c in candidates:
-                    key=c['polyline']
-                    if key in seen_shapes: continue
-                    seen_shapes.add(key); unique.append(c)
-                candidates=unique
-                if candidates:
-                    for c in candidates:
-                        dist=c['_metrics']['distance']; dur=c['_metrics']['duration']
-                        c['score']=round(max(0,min(100,(0.55*(1/(1+dist/10000))+0.45*(1/(1+dur/900)))*100)),1)
-                        c.pop('_metrics',None)
-                    candidates.sort(key=lambda x:x['score'],reverse=True)
-                    for idx,c in enumerate(candidates,1):
-                        c['id']=idx; c['recommended']=idx==1
-                        c['recommendation']='Recommended based on actual road distance and travel time. Live traffic is unavailable in fallback mode.' if idx==1 else 'Alternative actual road route returned by the routing provider.'
-                    return jsonify({
-                        'routes':candidates,
-                        'source':'Valhalla / OpenStreetMap fallback',
-                        'provider':'valhalla',
-                        'max_provider_routes':4,
-                        'google_error':google_error,
-                        'note':'Google Routes API was unavailable for this request. Valhalla returned the actual primary route and available alternatives; no fake routes are generated.'
-                    })
-        except Exception as valhalla_error:
-            pass
+            else:
+                try: google_error=r.json().get('error',{}).get('message') or r.text[:500]
+                except Exception: google_error=r.text[:500]
+        except Exception as e:
+            google_error=str(e)
+    else:
+        google_error='Google Maps API key is not configured.'
 
-        # Second free fallback: OSRM. It can request up to three alternatives,
-        # but the provider may legitimately return fewer when alternatives do not
-        # exist for the selected origin/destination.
+    # 2) Valhalla — up to 3 genuine alternatives.
+    try:
+        vbody={
+            'locations':[{'lat':float(a['lat']),'lon':float(a['lon'])},{'lat':float(b['lat']),'lon':float(b['lon'])}],
+            'costing':'auto','alternates':3,'units':'kilometers','language':'en-US','directions_type':'instructions'
+        }
+        vr=requests.post(VALHALLA,json=vbody,headers={**HEADERS,'X-Client-Id':'smart-traffic-management-system'},timeout=18)
+        if vr.ok:
+            vd=vr.json(); trips=[]
+            if vd.get('trip'): trips.append(vd['trip'])
+            for alt in (vd.get('alternates') or []):
+                trip=alt.get('trip') if isinstance(alt,dict) and alt.get('trip') else alt
+                if isinstance(trip,dict): trips.append(trip)
+            for trip in trips:
+                summary=trip.get('summary') or {}; legs=trip.get('legs') or []
+                shape=''.join((leg.get('shape') or '') for leg in legs)
+                if not shape or not summary.get('length'): continue
+                dist=float(summary.get('length',0))*1000; dur=float(summary.get('time',0))
+                add_candidate({
+                    'distance_km':round(dist/1000,2),'duration_min':round(dur/60,1),
+                    'traffic':'Live traffic unavailable (Valhalla fallback)','accidents':'No verified accident feed connected',
+                    'route_label':'Valhalla road route','polyline':shape,'polyline_precision':6,'provider':'valhalla',
+                    '_metrics':{'distance':dist,'duration':dur,'static':dur}
+                })
+    except Exception:
+        pass
+
+    # 3) OSRM — up to 3 genuine alternatives.
+    try:
         coords=f"{float(a['lon'])},{float(a['lat'])};{float(b['lon'])},{float(b['lat'])}"
-        rr=requests.get(OSRM+'/'+coords,params={
-            'overview':'full','alternatives':3,'steps':'false','geometries':'polyline'
-        },headers=HEADERS,timeout=15)
-        rr.raise_for_status(); od=rr.json()
-        raw=od.get('routes',[])
-        if not raw:
-            return jsonify({'error':'No road route was returned by the available routing providers.','details':google_error}),502
-        candidates=[]
-        for i,x in enumerate(raw):
-            dist=float(x.get('distance',0)); dur=float(x.get('duration',0))
-            candidates.append({
-                'id':i+1,
-                'distance_km':round(dist/1000,2),
-                'duration_min':round(dur/60,1),
-                'traffic':'Live traffic unavailable (OSRM fallback)',
-                'accidents':'No verified accident feed connected',
-                'route_label':'OSRM road route',
-                'polyline':x.get('geometry'),
-                'polyline_precision':5,
-                '_metrics':{'distance':dist,'duration':dur}
+        rr=requests.get(OSRM+'/'+coords,params={'overview':'full','alternatives':3,'steps':'false','geometries':'polyline'},headers=HEADERS,timeout=15)
+        rr.raise_for_status()
+        for x in rr.json().get('routes',[]):
+            dist=float(x.get('distance',0)); dur=float(x.get('duration',0)); poly=x.get('geometry')
+            if not poly or not dist: continue
+            add_candidate({
+                'distance_km':round(dist/1000,2),'duration_min':round(dur/60,1),
+                'traffic':'Live traffic unavailable (OSRM fallback)','accidents':'No verified accident feed connected',
+                'route_label':'OSRM road route','polyline':poly,'polyline_precision':5,'provider':'osrm',
+                '_metrics':{'distance':dist,'duration':dur,'static':dur}
             })
-        unique=[]; seen_shapes=set()
-        for c in candidates:
-            key=c['polyline']
-            if not key or key in seen_shapes: continue
-            seen_shapes.add(key); unique.append(c)
-        candidates=unique
-        for c in candidates:
-            c['score']=round(max(0,min(100,(0.55*(1/(1+c['_metrics']['distance']/10000))+0.45*(1/(1+c['_metrics']['duration']/900)))*100)),1)
-            c.pop('_metrics',None)
-        candidates.sort(key=lambda x:x['score'],reverse=True)
-        for idx,c in enumerate(candidates,1):
-            c['id']=idx; c['recommended']=idx==1
-            c['recommendation']='Recommended based on actual road distance and travel time. Live traffic is unavailable in fallback mode.' if idx==1 else 'Alternative actual road route returned by the routing provider.'
-        return jsonify({
-            'routes':candidates,
-            'source':'OSRM / OpenStreetMap fallback',
-            'provider':'osrm',
-            'max_provider_routes':4,
-            'google_error':google_error,
-            'note':'Google Routes API was unavailable for this request, so actual OSRM road routes are shown. No fake routes or traffic values are added.'
-        })
-    except requests.HTTPError as e:
-        detail=getattr(e.response,'text',str(e))
-        return jsonify({'error':'Routing providers rejected the request.','details':detail}),502
-    except Exception as e:
-        return jsonify({'error':'Routing service is temporarily unavailable.','details':str(e)}),502
+    except Exception:
+        pass
+
+    if not all_candidates:
+        return jsonify({'error':'No road route was returned by the available routing providers.','details':google_error}),502
+
+    for c in all_candidates:
+        metrics=c.get('_metrics',{})
+        dist=float(metrics.get('distance',c.get('distance_km',0)*1000))
+        dur=float(metrics.get('duration',c.get('duration_min',0)*60))
+        static=float(metrics.get('static',dur))
+        c['score']=_route_score({'_metrics':{'distance':dist,'duration':dur,'static':static}})
+        c.pop('_metrics',None)
+
+    all_candidates.sort(key=lambda x:(-float(x.get('score',0)),float(x.get('duration_min',0)),float(x.get('distance_km',0))))
+    all_candidates=all_candidates[:10]
+    for idx,c in enumerate(all_candidates,1):
+        c['id']=idx; c['recommended']=idx==1
+        c['recommendation']='Recommended based on actual distance, travel time and available traffic data.' if idx==1 else 'Alternative actual road route returned by a routing provider.'
+        c.pop('_path_signature',None)
+
+    provider_counts={}
+    for c in all_candidates: provider_counts[c['provider']]=provider_counts.get(c['provider'],0)+1
+    return jsonify({
+        'routes':all_candidates,'source':'Google Routes API + Valhalla + OSRM',
+        'provider_counts':provider_counts,'max_routes':10,'google_error':google_error,
+        'note':'Up to 10 distinct genuine road routes are collected from multiple real routing providers. The app never fabricates or duplicates a route; fewer than 10 are returned when fewer distinct road paths are available.'
+    })
+
+
+def decode_polyline_backend(encoded, precision=5):
+    if not encoded: return []
+    factor=10**int(precision or 5); index=0; lat=0; lng=0; points=[]
+    try:
+        while index < len(encoded):
+            shift=0; result=0
+            while True:
+                b=ord(encoded[index])-63; index+=1; result |= (b & 31) << shift; shift += 5
+                if b < 32: break
+            lat += (~(result >> 1) if result & 1 else (result >> 1))
+            shift=0; result=0
+            while True:
+                b=ord(encoded[index])-63; index+=1; result |= (b & 31) << shift; shift += 5
+                if b < 32: break
+            lng += (~(result >> 1) if result & 1 else (result >> 1))
+            points.append({'lat':lat/factor,'lng':lng/factor})
+    except (IndexError,ValueError):
+        return []
+    return points
+
+
+def path_signature_backend(path):
+    if not path: return ''
+    step=max(1,len(path)//24); out=[]
+    for p in path[::step][:24]:
+        try:
+            if isinstance(p,(list,tuple)):
+                lat,lng=float(p[0]),float(p[1])
+            else:
+                lat,lng=float(p.get('lat')),float(p.get('lng'))
+            out.append(f'{lat:.4f},{lng:.4f}')
+        except Exception:
+            continue
+    return '|'.join(out)
 
 def parse_duration(value):
     try:
