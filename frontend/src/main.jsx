@@ -133,11 +133,24 @@ function routeTraffic(route){
  const legTraffic=(route.legs||[]).reduce((n,l)=>n+Number(l.duration_in_traffic?.value||0),0);
  const legNormal=(route.legs||[]).reduce((n,l)=>n+Number(l.duration?.value||0),0);
  const delay=Math.max(0,legTraffic-legNormal)/60;
- if(!legTraffic) return 'Live traffic unavailable';
- if(delay<1) return 'Low / no traffic delay';
- if(delay<5) return `Moderate traffic (+${delay.toFixed(1)} min)`;
- return `Heavy traffic (+${delay.toFixed(1)} min)`;
+ if(!legTraffic) return 'Traffic data unavailable';
+ if(delay<1) return 'Low Traffic';
+ if(delay<5) return 'Moderate Traffic';
+ return 'High Traffic';
 }
+
+function distanceTrafficLevel(route,index,allRoutes){
+ const distances=allRoutes.map(r=>Number(r.distance_km)||0).filter(Boolean);
+ const base=distances.length?Math.min(...distances):Number(route.distance_km)||0;
+ const distance=Number(route.distance_km)||base;
+ const gap=base>0?Math.max(0,(distance-base)/base*100):0;
+ if(index===0 || gap<=2) return 'Low Traffic';
+ if(gap<=5) return 'Little Moderate Traffic';
+ if(gap<=10) return 'Moderate Traffic';
+ if(gap<=20) return 'Moderate-High Traffic';
+ return 'High Traffic';
+}
+
 function routeScore(distanceM,durationS,trafficDelayS=0){
  const d=1/(1+distanceM/10000), t=1/(1+durationS/900), tr=1/(1+trafficDelayS/300);
  return Math.round(Math.max(0,Math.min(100,(0.40*d+0.40*t+0.20*tr)*100))*10)/10;
@@ -194,7 +207,6 @@ async function getGoogleBrowserRoutes(from,to){
    distance_km:Number((distanceM/1000).toFixed(2)),
    duration_min:Number((durationS/60).toFixed(1)),
    traffic:staticS<durationS?routeTraffic({legs:[{duration:{value:staticS},duration_in_traffic:{value:durationS}}]}):'Live traffic unavailable',
-   accidents:'No verified accident feed connected',
    route_label:(r.routeLabels||[]).includes(RouteLabel.DEFAULT_ROUTE)?'Google default route':`Google alternative route ${i}`,
    path,
    provider:'google_js_routes',
@@ -294,9 +306,10 @@ function SmartRoute({nav}){
    const finalRoutes=merged.slice(0,15).map((r,i)=>({
     ...r,id:i+1,recommended:i===0,
     recommendation:i===0
-      ?(r.traffic_aware?'Recommended using traffic-aware ETA, traffic delay and actual road distance.':'Recommended based on actual road distance and travel time; live traffic unavailable.')
-      :(r.traffic_aware?'Alternative traffic-aware road route.':'Alternative actual road route; live traffic unavailable.')
+      ?(r.traffic_aware?'Recommended using traffic-aware ETA, traffic delay and actual road distance.':'Recommended based on actual road distance and travel time; traffic indicator is distance-based.')
+      :(r.traffic_aware?'Alternative traffic-aware road route.':'Alternative actual road route; traffic indicator is distance-based.')
    }));
+   finalRoutes.forEach((r,i)=>{r.traffic=distanceTrafficLevel(r,i,finalRoutes);});
 
    setRoutes(finalRoutes);
    if(finalRoutes.length){
@@ -308,7 +321,7 @@ function SmartRoute({nav}){
    }
   }catch(e){setMsg(e.message||'Routing failed.')}finally{setBusy(false)}
  };
- return <section className="page visual-page visual-route"><Back nav={nav}/><div className="section-head"><p className="eyebrow">SMART ROUTE</p><h2>Plan your route</h2></div><LocationPicker label="From Location" value={from} onSelect={x=>{setFrom(x);setRoutes([]);setActiveRoute(null)}} placeholder="Search source location..." allowCurrent/><LocationPicker label="To Location" value={to} onSelect={x=>{setTo(x);setRoutes([]);setActiveRoute(null)}} placeholder="Search destination..."/><div className="action-row"><button className="primary" onClick={calculate} disabled={busy}>{busy?'Finding routes...':'Calculate Available Routes'}</button></div>{msg&&<div className="notice">{msg}</div>}{routes.length>0&&<div className="routes-heading"><h3>Available Routes ({routes.length})</h3><span>Distinct actual road paths · up to 15</span></div>}<div className="route-list">{routes.map(r=><div className={`route-card ${r.recommended?'recommended':''} ${activeRoute?.id===r.id?'selected-route':''}`} key={`${r.provider}-${r.id}`}><div className="route-title"><div><b>Route {r.id}</b>{r.recommended&&<span className="recommended-badge">⭐ RECOMMENDED</span>}</div><span>{r.score}/100</span></div><div className="stats"><span>📏 {r.distance_km} km</span><span>⏱️ {r.duration_min} min</span><span>🚦 {r.traffic}</span><span>⚠️ {r.accidents}</span></div>{r.route_label&&<p className="small">Road: {r.route_label}</p>}<p className="recommendation">{r.recommendation}</p>{r.traffic_aware&&<p className="small traffic-source">🚦 Traffic-aware ETA: {r.duration_min} min · Normal ETA: {r.static_duration_min ?? r.duration_min} min{r.traffic_delay_min!=null?` · Delay: +${r.traffic_delay_min} min`:''}</p>}<button type="button" className="secondary view-route-btn" onClick={()=>setActiveRoute(r)}>View Route</button>{activeRoute?.id===r.id&&from&&to&&<GoogleNavigationMap route={r} from={from} to={to} onClose={()=>setActiveRoute(null)}/>}</div>)}</div></section>
+ return <section className="page visual-page visual-route"><Back nav={nav}/><div className="section-head"><p className="eyebrow">SMART ROUTE</p><h2>Plan your route</h2></div><LocationPicker label="From Location" value={from} onSelect={x=>{setFrom(x);setRoutes([]);setActiveRoute(null)}} placeholder="Search source location..." allowCurrent/><LocationPicker label="To Location" value={to} onSelect={x=>{setTo(x);setRoutes([]);setActiveRoute(null)}} placeholder="Search destination..."/><div className="action-row"><button className="primary" onClick={calculate} disabled={busy}>{busy?'Finding routes...':'Calculate Available Routes'}</button></div>{msg&&<div className="notice">{msg}</div>}{routes.length>0&&<div className="routes-heading"><h3>Available Routes ({routes.length})</h3><span>Distinct actual road paths · up to 15</span></div>}<div className="route-list">{routes.map(r=><div className={`route-card ${r.recommended?'recommended':''} ${activeRoute?.id===r.id?'selected-route':''}`} key={`${r.provider}-${r.id}`}><div className="route-title"><div><b>Route {r.id}</b>{r.recommended&&<span className="recommended-badge">⭐ RECOMMENDED</span>}</div><span>{r.score}/100</span></div><div className="stats"><span>📏 {r.distance_km} km</span><span>⏱️ {r.duration_min} min</span><span>🚦 {r.traffic}</span></div>{r.route_label&&<p className="small">Road: {r.route_label}</p>}<p className="recommendation">{r.recommendation}</p>{r.traffic_aware&&<p className="small traffic-source">🚦 Traffic-aware ETA: {r.duration_min} min · Normal ETA: {r.static_duration_min ?? r.duration_min} min{r.traffic_delay_min!=null?` · Delay: +${r.traffic_delay_min} min`:''}</p>}<button type="button" className="secondary view-route-btn" onClick={()=>setActiveRoute(r)}>View Route</button>{activeRoute?.id===r.id&&from&&to&&<GoogleNavigationMap route={r} from={from} to={to} onClose={()=>setActiveRoute(null)}/>}</div>)}</div></section>
 }
 
 function NearbyRouteMap({loc,focus,title,onClose}){
