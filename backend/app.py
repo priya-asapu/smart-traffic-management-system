@@ -384,9 +384,38 @@ def haversine(a,b,c,d):
 def _traffic_label(duration_s, static_s):
     if not static_s or static_s <= 0: return 'Traffic data unavailable'
     delay=max(0.0,float(duration_s)-float(static_s)) / 60.0
-    if delay < 1: return 'Low / no traffic delay'
-    if delay < 5: return f'Moderate traffic (+{delay:.1f} min)'
-    return f'Heavy traffic (+{delay:.1f} min)'
+    if delay < 1: return 'Low Traffic'
+    if delay < 5: return f'Moderate Traffic (+{delay:.1f} min)'
+    return f'High Traffic (+{delay:.1f} min)'
+
+def _distance_traffic_levels(routes):
+    """Assign a relative traffic indicator from route distance.
+    The shortest/recommended route is always Low Traffic. Other routes
+    increase gradually as their distance exceeds the shortest route.
+    This is an application indicator, not live traffic data.
+    """
+    if not routes:
+        return routes
+    base=min(float(r.get('distance_km',0) or 0) for r in routes)
+    if base <= 0:
+        for i,r in enumerate(routes):
+            r['traffic']='Low Traffic' if i == 0 else 'Moderate Traffic'
+        return routes
+    for i,r in enumerate(routes):
+        dist=float(r.get('distance_km',0) or 0)
+        gap=max(0.0,(dist-base)/base*100.0)
+        if i == 0 or gap <= 2:
+            level='Low Traffic'
+        elif gap <= 5:
+            level='Little Moderate Traffic'
+        elif gap <= 10:
+            level='Moderate Traffic'
+        elif gap <= 20:
+            level='Moderate-High Traffic'
+        else:
+            level='High Traffic'
+        r['traffic']=level
+    return routes
 
 def _route_score(route):
     # Relative score using only actual returned route metrics. Accident data is not
@@ -443,7 +472,6 @@ def routes():
                         'distance_km':round(dist/1000,2),'duration_min':round(dur/60,1),
                         'static_duration_min':round(static/60,1),'traffic_delay_min':round(delay/60,1),
                         'traffic':_traffic_label(dur,static),'traffic_aware':True,
-                        'accidents':'No verified accident feed connected',
                         'route_label':(x.get('routeLabels') or ['Google traffic-aware route'])[0],
                         'description':x.get('description') or '',
                         'polyline':poly,'polyline_precision':5,'path':path,
@@ -481,7 +509,7 @@ def routes():
                 candidates.append({
                     'distance_km':round(dist/1000,2),'duration_min':round(dur/60,1),
                     'traffic':'Traffic unavailable — Valhalla road routing','traffic_aware':False,
-                    'traffic_delay_min':None,'accidents':'No verified accident feed connected',
+                    'traffic_delay_min':None,
                     'route_label':'Valhalla road route','polyline':shape,'polyline_precision':6,
                     'path':path,'provider':'valhalla_fallback','source_provider':'Valhalla',
                     '_metrics':{'distance':dist,'duration':dur,'static':dur}
@@ -510,7 +538,7 @@ def routes():
                 candidates.append({
                     'distance_km':round(dist/1000,2),'duration_min':round(dur/60,1),
                     'traffic':'Traffic unavailable — OSRM road routing','traffic_aware':False,
-                    'traffic_delay_min':None,'accidents':'No verified accident feed connected',
+                    'traffic_delay_min':None,
                     'route_label':label,'polyline':poly,'polyline_precision':5,'path':path,
                     'provider':'osrm_fallback','source_provider':'OSRM','_metrics':{'distance':dist,'duration':dur,'static':dur}
                 })
@@ -537,6 +565,7 @@ def routes():
     # Traffic-aware routes are ranked using the real traffic-aware metrics.
     # Fallback routes remain clearly marked as non-traffic-aware.
     unique.sort(key=lambda x:(-float(x.get('score',0)),float(x.get('duration_min',999999)),float(x.get('distance_km',999999))))
+    _distance_traffic_levels(unique)
     for idx,c in enumerate(unique,1):
         c['id']=idx
         c['recommended']=idx==1
