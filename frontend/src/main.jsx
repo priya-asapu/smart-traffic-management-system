@@ -61,55 +61,55 @@ function Feature({icon,image,title,click,tone}){return <button className={`featu
 function LocationPicker({label,value,onSelect,placeholder='Type a place...',allowCurrent=false}){
  const [q,setQ]=useState(value?.name||''); const [results,setResults]=useState([]); const [loading,setLoading]=useState(false); const [gpsLoading,setGpsLoading]=useState(false); const [error,setError]=useState(''); const [accuracy,setAccuracy]=useState(null); const timer=useRef(null); const sessionRef=useRef(null);
  useEffect(()=>setQ(value?.name||''),[value?.name]);
- const ensurePlaces=async()=>{await loadGoogleMapsScript(); const places=await window.google.maps.importLibrary('places'); return places;};
+ const googleSearch=async query=>{
+   try{
+     const r=await fetch(API+'/google/autocomplete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({input:query})});
+     const d=await r.json();
+     if(!r.ok) throw new Error(d.error||'Google autocomplete unavailable');
+     return (d.suggestions||[]).map(x=>({place:x.place,name:x.name||'',main:x.main||x.name||'',secondary:x.secondary||'',provider:'google'}));
+   }catch(e){ return []; }
+ };
+ const nominatimSearch=async query=>{
+   try{
+     const url='https://nominatim.openstreetmap.org/search?format=jsonv2&addressdetails=1&limit=6&countrycodes=in&q='+encodeURIComponent(query);
+     const r=await fetch(url,{headers:{Accept:'application/json'}}); if(!r.ok) return [];
+     const d=await r.json();
+     return (d||[]).map(x=>({name:x.display_name||query,main:(x.display_name||query).split(',')[0],secondary:(x.display_name||'').split(',').slice(1,4).join(',').trim(),lat:Number(x.lat),lon:Number(x.lon),placeId:x.osm_id,provider:'nominatim'}));
+   }catch(e){ return []; }
+ };
  const search=async text=>{
    const query=(text??q).trim();
    if(query.length<2){setResults([]);return;}
    setLoading(true);setError('');
    try{
-     const {AutocompleteSessionToken,AutocompleteSuggestion}=await ensurePlaces();
-     if(!sessionRef.current) sessionRef.current=new AutocompleteSessionToken();
-     const request={input:query,sessionToken:sessionRef.current,language:'en',region:'IN',includedRegionCodes:['in']};
-     const {suggestions=[]}=await AutocompleteSuggestion.fetchAutocompleteSuggestions(request);
-     const out=suggestions.map(s=>s.placePrediction).filter(Boolean).map(p=>({
-       prediction:p,
-       place:p.place,
-       placeId:p.placeId,
-       name:p.text?.text||'',
-       main:p.structuredFormat?.mainText?.text||p.text?.text||'',
-       secondary:p.structuredFormat?.secondaryText?.text||''
-     }));
+     // Use the backend Places API first. This avoids breaking location suggestions
+     // when the browser key does not have Places Library access. Fall back to OSM.
+     let out=await googleSearch(query);
+     if(!out.length) out=await nominatimSearch(query);
      setResults(out);
-   }catch(e){
-     console.error('Google Places Autocomplete error:',e);
-     setResults([]);
-     setError('Google suggestions could not be loaded. Please make sure Places API (New) is enabled for the same Google Maps key.');
-   }finally{setLoading(false)}
+     if(!out.length) setError('No locations found.');
+   }catch(e){setResults([]);setError('Location suggestions are temporarily unavailable.');}
+   finally{setLoading(false)}
  };
  const onChange=e=>{const text=e.target.value;setQ(text);onSelect(null);setAccuracy(null);setResults([]);clearTimeout(timer.current);timer.current=setTimeout(()=>search(text),300)};
  const choose=async x=>{
    setLoading(true);setError('');
    try{
-     const place=x.prediction?.toPlace();
-     if(!place) throw new Error('Google did not return a place prediction.');
-     await place.fetchFields({fields:['displayName','formattedAddress','location','id','primaryType','types']});
-     if(!place.location) throw new Error('Google did not return the selected place location.');
-     const d={
-       name:place.displayName||x.name||'Selected Place',
-       display_name:place.displayName||x.name||'Selected Place',
-       address:place.formattedAddress||'',
-       lat:Number(place.location.lat()),
-       lon:Number(place.location.lng()),
-       place_id:place.id||x.placeId,
-       category:place.primaryType||'',
-       types:place.types||[]
-     };
-     setQ(d.name);setResults([]);setAccuracy(null);onSelect(d);
-     sessionRef.current=null;
-   }catch(e){console.error('Google place selection error:',e);setError(e.message||'Could not load the selected Google place.')}finally{setLoading(false)}
+     let d;
+     if(x.provider==='google' && x.place){
+       const r=await fetch(API+'/google/place-details',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({place:x.place})});
+       const pd=await r.json();
+       if(!r.ok) throw new Error(pd.error||'Unable to load selected place');
+       d={name:pd.name||x.name,address:pd.name||x.secondary||'',lat:Number(pd.lat),lon:Number(pd.lon),place_id:pd.place_id||x.place,category:pd.category||'',types:pd.types||[]};
+     }else{
+       d={name:x.name,address:x.name,lat:Number(x.lat),lon:Number(x.lon),place_id:x.placeId,category:'',types:[]};
+     }
+     if(!Number.isFinite(d.lat)||!Number.isFinite(d.lon)) throw new Error('Selected location has no coordinates.');
+     setQ(d.name);setResults([]);setAccuracy(null);onSelect(d);sessionRef.current=null;
+   }catch(e){console.error('Location selection error:',e);setError(e.message||'Could not load the selected location.')}finally{setLoading(false)}
  };
  const gps=()=>{setGpsLoading(true);setError('');setAccuracy(null);if(!navigator.geolocation){setError('Your browser does not support location.');setGpsLoading(false);return;}let best=null;let watchId=null;let finished=false;const finish=async()=>{if(finished)return;finished=true;if(watchId!==null)navigator.geolocation.clearWatch(watchId);if(!best){setError('Unable to get a fresh GPS position. Turn on Windows Location Services and allow Chrome to access your location, then try again.');setGpsLoading(false);return;}const accuracy_m=Math.round(best.coords.accuracy);const x={name:'Detecting your exact current location...',lat:best.coords.latitude,lon:best.coords.longitude,accuracy_m};setAccuracy(accuracy_m);try{const r=await fetch(API+'/reverse-geocode',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({lat:x.lat,lon:x.lon})});const d=await r.json();if(!r.ok)throw Error(d.error||'Could not identify your location');x.name=d.name||'Current Location';setQ(x.name);setResults([]);onSelect(x)}catch(e){setError(e.message||'Could not identify your current location.');onSelect(null)}finally{setGpsLoading(false)}};const onPos=p=>{if(!best||p.coords.accuracy<best.coords.accuracy)best=p;setAccuracy(Math.round(p.coords.accuracy));if(best.coords.accuracy<=30)finish();};watchId=navigator.geolocation.watchPosition(onPos,e=>{if(e.code===1)setError('Location permission was blocked. Click Chrome location icon and allow access.');else setError('Unable to detect your current GPS location. Check Windows Location Services and Chrome location permission.');}, {enableHighAccuracy:true,timeout:20000,maximumAge:0});setTimeout(finish,6000)};
- return <div className={`loc ${results.length>0 ? 'loc-open' : ''}`}><label>{label}</label><div className="searchrow"><input value={q} onChange={onChange} onKeyDown={e=>e.key==='Enter'&&search()} placeholder={placeholder}/><button type="button" className="secondary" onClick={()=>search()} disabled={loading}>{loading?'Searching...':'Search'}</button>{allowCurrent&&<button type="button" className="secondary" onClick={gps} disabled={gpsLoading}>{gpsLoading?'Detecting...':'📍 Use Current Location'}</button>}</div>{results.length>0&&<div className="suggestions"><div className="google-attribution"><img src="https://www.gstatic.com/images/branding/googlelogo/1x/googlelogo_color_74x24dp.png" alt="Google"/></div>{results.map((x,i)=><button type="button" key={i} onClick={()=>choose(x)}><span>📍</span><span><b>{x.main||shortName(x.name)}</b><small>{x.secondary||x.name}</small></span></button>)}</div>}{value&&<div className="selected">✓ Location selected{value.accuracy_m?` · GPS accuracy ±${value.accuracy_m} m`:''}</div>}{error&&<div className="error">{error}</div>}</div>
+ return <div className={`loc ${results.length>0 ? 'loc-open' : ''}`}><label>{label}</label><div className="searchrow"><input value={q} onChange={onChange} onKeyDown={e=>e.key==='Enter'&&search()} placeholder={placeholder}/><button type="button" className="secondary" onClick={()=>search()} disabled={loading}>{loading?'Searching...':'Search'}</button>{allowCurrent&&<button type="button" className="secondary" onClick={gps} disabled={gpsLoading}>{gpsLoading?'Detecting...':'📍 Use Current Location'}</button>}</div>{results.length>0&&<div className="suggestions"><div className="google-attribution"><span>Location suggestions</span></div>{results.map((x,i)=><button type="button" key={`${x.provider}-${i}`} onClick={()=>choose(x)}><span>📍</span><span><b>{x.main||shortName(x.name)}</b><small>{x.secondary||x.name}</small></span></button>)}</div>}{value&&<div className="selected">✓ Location selected{value.accuracy_m?` · GPS accuracy ±${value.accuracy_m} m`:''}</div>}{error&&<div className="error">{error}</div>}</div>
 }
 function shortName(s){return (s||'').split(',')[0]||s}
 function decodePolyline(encoded,precision=5){let index=0,lat=0,lng=0,points=[];const factor=10**precision;while(index<encoded.length){let b,shift=0,result=0;do{b=encoded.charCodeAt(index++)-63;result|=(b&31)<<shift;shift+=5}while(b>=32);lat+=result&1?~(result>>1):(result>>1);shift=0;result=0;do{b=encoded.charCodeAt(index++)-63;result|=(b&31)<<shift;shift+=5}while(b>=32);lng+=result&1?~(result>>1):(result>>1);points.push([lat/factor,lng/factor])}return points}
@@ -123,7 +123,7 @@ async function loadGoogleMapsScript(){
   if(existing){existing.addEventListener('load',resolve,{once:true});existing.addEventListener('error',()=>reject(new Error('Google Maps failed to load.')),{once:true});return;}
   const script=document.createElement('script');
   script.dataset.smartTrafficGoogleMaps='true';
-  script.src=`https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(cfg.google_maps_api_key)}&v=weekly&libraries=routes,places`;
+  script.src=`https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(cfg.google_maps_api_key)}&v=weekly&libraries=routes`;
   script.async=true;script.defer=true;script.onload=resolve;script.onerror=()=>reject(new Error('Google Maps failed to load. Check that Maps JavaScript API is enabled for this key.'));
   document.head.appendChild(script);
  });
