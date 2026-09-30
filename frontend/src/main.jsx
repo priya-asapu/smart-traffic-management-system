@@ -59,143 +59,57 @@ function Dashboard({nav}){return <section className="page visual-page visual-das
 function Feature({icon,image,title,click,tone}){return <button className={`feature feature-${tone||'default'}`} onClick={click}>{image?<img className="feature-image" src={image} alt="" />:<div className="feature-icon">{icon}</div>}<div><h3>{title}</h3></div><span>→</span></button>}
 
 function LocationPicker({label,value,onSelect,placeholder='Type a place...',allowCurrent=false}){
- const [q,setQ]=useState(value?.name||'');
- const [results,setResults]=useState([]);
- const [loading,setLoading]=useState(false);
- const [gpsLoading,setGpsLoading]=useState(false);
- const [error,setError]=useState('');
- const [accuracy,setAccuracy]=useState(null);
- const timer=useRef(null);
- const sessionRef=useRef(null);
+ const [q,setQ]=useState(value?.name||''); const [results,setResults]=useState([]); const [loading,setLoading]=useState(false); const [gpsLoading,setGpsLoading]=useState(false); const [error,setError]=useState(''); const [accuracy,setAccuracy]=useState(null); const timer=useRef(null); const sessionRef=useRef(null);
  useEffect(()=>setQ(value?.name||''),[value?.name]);
-
- const ensurePlaces=async()=>{
-  await loadGoogleMapsScript();
-  if(!window.google?.maps?.importLibrary) throw new Error('Google Maps JavaScript API is unavailable.');
-  return await window.google.maps.importLibrary('places');
- };
-
- const searchBackend=async query=>{
-  const r=await fetch(API+'/google/autocomplete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({input:query})});
-  const d=await r.json();
-  if(!r.ok) throw Error(d.error||'Google location suggestions are unavailable right now.');
-  return (d.suggestions||[]).map(p=>({
-   prediction:null,
-   place:p.place,
-   placeId:p.place,
-   name:p.name||p.main||'',
-   main:p.main||p.name||'',
-   secondary:p.secondary||''
-  }));
- };
-
+ const ensurePlaces=async()=>{await loadGoogleMapsScript(); const places=await window.google.maps.importLibrary('places'); return places;};
  const search=async text=>{
-  const query=(text??q).trim();
-  if(query.length<2){setResults([]);setError('');return;}
-  setLoading(true);setError('');
-  try{
-   let out=[];
+   const query=(text??q).trim();
+   if(query.length<2){setResults([]);return;}
+   setLoading(true);setError('');
    try{
-    const {AutocompleteSessionToken,AutocompleteSuggestion}=await ensurePlaces();
-    if(!sessionRef.current) sessionRef.current=new AutocompleteSessionToken();
-    const request={input:query,sessionToken:sessionRef.current,language:'en',region:'IN',includedRegionCodes:['in']};
-    const {suggestions=[]}=await AutocompleteSuggestion.fetchAutocompleteSuggestions(request);
-    out=suggestions.map(s=>s.placePrediction).filter(Boolean).map(prediction=>({
-     prediction,
-     place:prediction.place,
-     placeId:prediction.placeId,
-     name:prediction.text?.text||'',
-     main:prediction.structuredFormat?.mainText?.text||prediction.text?.text||'',
-     secondary:prediction.structuredFormat?.secondaryText?.text||''
-    }));
-   }catch(primaryError){
-    console.warn('Google JS Places suggestions unavailable; trying backend Places endpoint.',primaryError);
-    out=await searchBackend(query);
-   }
-   setResults(out);
-   if(!out.length) setError('No matching locations found.');
-  }catch(e){
-   console.error('Google location search error:',e);
-   setResults([]);
-   setError('Location suggestions are unavailable. Please check the Google Places API configuration.');
-  }finally{setLoading(false)}
- };
-
- const onChange=e=>{
-  const text=e.target.value;
-  setQ(text);onSelect(null);setAccuracy(null);setError('');setResults([]);
-  clearTimeout(timer.current);
-  timer.current=setTimeout(()=>search(text),350);
- };
-
- const choose=async x=>{
-  setLoading(true);setError('');
-  try{
-   let d=null;
-   // Normal Google JS Places result.
-   if(x.prediction){
-    const place=x.prediction.toPlace();
-    if(!place) throw new Error('Google did not return a place prediction.');
-    await place.fetchFields({fields:['displayName','formattedAddress','location','id','primaryType','types']});
-    if(place.location){
-     d={name:place.displayName||x.name||'Selected Place',display_name:place.displayName||x.name||'Selected Place',address:place.formattedAddress||'',lat:Number(place.location.lat()),lon:Number(place.location.lng()),place_id:place.id||x.placeId,category:place.primaryType||'',types:place.types||[]};
-    }
-   }
-   // Backend Places fallback when JS Places is unavailable.
-   if(!d && x.place){
-    const r=await fetch(API+'/google/place-details',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({place:x.place})});
-    const pd=await r.json();
-    if(!r.ok) throw Error(pd.error||'Unable to load the selected Google place.');
-    d={name:pd.name||x.name||'Selected Place',display_name:pd.name||x.name||'Selected Place',address:pd.name||x.secondary||'',lat:Number(pd.lat),lon:Number(pd.lon),place_id:pd.place_id||x.place,category:pd.category||'',types:pd.types||[]};
-   }
-   if(!d || !Number.isFinite(d.lat) || !Number.isFinite(d.lon)) throw new Error('Google did not return the selected place location.');
-   setQ(d.name);setResults([]);setAccuracy(null);onSelect(d);sessionRef.current=null;
-  }catch(e){console.error('Google place selection error:',e);setError(e.message||'Could not load the selected Google place.')}finally{setLoading(false)}
- };
-
- const gps=()=>{
-  setGpsLoading(true);setError('');setAccuracy(null);setResults([]);
-  if(!navigator.geolocation){setError('Your browser does not support location.');setGpsLoading(false);return;}
-  let best=null,watchId=null,finished=false;
-  const finish=async()=>{
-   if(finished)return;finished=true;
-   if(watchId!==null)navigator.geolocation.clearWatch(watchId);
-   if(!best){setError('Unable to get your current location. Please allow location access and try again.');setGpsLoading(false);return;}
-   const accuracy_m=Math.round(best.coords.accuracy);
-   // Do not silently present a very coarse browser position as an exact location.
-   if(accuracy_m>300){
-    setAccuracy(accuracy_m);
-    setError(`GPS accuracy is too low (±${accuracy_m} m). Please turn ON Precise Location/GPS for Chrome and try again.`);
-    setGpsLoading(false);return;
-   }
-   const x={name:'Current Location',lat:best.coords.latitude,lon:best.coords.longitude,accuracy_m};
-   setAccuracy(accuracy_m);
-   try{
-    const r=await fetch(API+'/reverse-geocode',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({lat:x.lat,lon:x.lon})});
-    const d=await r.json();
-    if(r.ok&&d.name)x.name=d.name;
-    setQ(x.name);setResults([]);onSelect(x);
+     const {AutocompleteSessionToken,AutocompleteSuggestion}=await ensurePlaces();
+     if(!sessionRef.current) sessionRef.current=new AutocompleteSessionToken();
+     const request={input:query,sessionToken:sessionRef.current,language:'en',region:'IN',includedRegionCodes:['in']};
+     const {suggestions=[]}=await AutocompleteSuggestion.fetchAutocompleteSuggestions(request);
+     const out=suggestions.map(s=>s.placePrediction).filter(Boolean).map(p=>({
+       prediction:p,
+       place:p.place,
+       placeId:p.placeId,
+       name:p.text?.text||'',
+       main:p.structuredFormat?.mainText?.text||p.text?.text||'',
+       secondary:p.structuredFormat?.secondaryText?.text||''
+     }));
+     setResults(out);
    }catch(e){
-    // Coordinates are still valid even if reverse-geocoding is unavailable.
-    setQ('Current Location');onSelect(x);
-   }finally{setGpsLoading(false)}
-  };
-  const onPos=p=>{
-   if(!best||p.coords.accuracy<best.coords.accuracy)best=p;
-   setAccuracy(Math.round(p.coords.accuracy));
-   if(best.coords.accuracy<=50)finish();
-  };
-  const onErr=e=>{
-   if(e.code===1)setError('Location permission was blocked. Allow Chrome to access your location and try again.');
-   else if(e.code===2)setError('Current location is unavailable. Turn ON GPS/Precise Location and try again.');
-   else setError('Location detection timed out. Turn ON GPS/Precise Location and try again.');
-  };
-  watchId=navigator.geolocation.watchPosition(onPos,onErr,{enableHighAccuracy:true,timeout:20000,maximumAge:0});
-  // Give mobile GPS more time to obtain a precise fix.
-  setTimeout(finish,12000);
+     console.error('Google Places Autocomplete error:',e);
+     setResults([]);
+     setError('Google suggestions could not be loaded. Please make sure Places API (New) is enabled for the same Google Maps key.');
+   }finally{setLoading(false)}
  };
-
- return <div className={`loc ${results.length>0 ? 'loc-open' : ''}`}><label>{label}</label><div className="searchrow"><input value={q} onChange={onChange} onKeyDown={e=>e.key==='Enter'&&search()} placeholder={placeholder}/>{allowCurrent&&<button type="button" className="secondary" onClick={gps} disabled={gpsLoading}>{gpsLoading?'Detecting...':'📍 Use Current Location'}</button>}</div>{results.length>0&&<div className="suggestions"><div className="google-attribution"><img src="https://www.gstatic.com/images/branding/googlelogo/1x/googlelogo_color_74x24dp.png" alt="Google"/></div>{results.map((x,i)=><button type="button" key={`${x.placeId||x.place||x.name}-${i}`} onClick={()=>choose(x)}><span>📍</span><span><b>{x.main||shortName(x.name)}</b><small>{x.secondary||x.name}</small></span></button>)}</div>}{value&&<div className="selected">✓ Location selected{value.accuracy_m?` · GPS accuracy ±${value.accuracy_m} m`:''}</div>}{accuracy&&gpsLoading&&<div className="small">📡 GPS accuracy ±{accuracy} m · waiting for a better fix...</div>}{error&&<div className="error">{error}</div>}</div>
+ const onChange=e=>{const text=e.target.value;setQ(text);onSelect(null);setAccuracy(null);setResults([]);clearTimeout(timer.current);timer.current=setTimeout(()=>search(text),300)};
+ const choose=async x=>{
+   setLoading(true);setError('');
+   try{
+     const place=x.prediction?.toPlace();
+     if(!place) throw new Error('Google did not return a place prediction.');
+     await place.fetchFields({fields:['displayName','formattedAddress','location','id','primaryType','types']});
+     if(!place.location) throw new Error('Google did not return the selected place location.');
+     const d={
+       name:place.displayName||x.name||'Selected Place',
+       display_name:place.displayName||x.name||'Selected Place',
+       address:place.formattedAddress||'',
+       lat:Number(place.location.lat()),
+       lon:Number(place.location.lng()),
+       place_id:place.id||x.placeId,
+       category:place.primaryType||'',
+       types:place.types||[]
+     };
+     setQ(d.name);setResults([]);setAccuracy(null);onSelect(d);
+     sessionRef.current=null;
+   }catch(e){console.error('Google place selection error:',e);setError(e.message||'Could not load the selected Google place.')}finally{setLoading(false)}
+ };
+ const gps=()=>{setGpsLoading(true);setError('');setAccuracy(null);if(!navigator.geolocation){setError('Your browser does not support location.');setGpsLoading(false);return;}let best=null;let watchId=null;let finished=false;const finish=async()=>{if(finished)return;finished=true;if(watchId!==null)navigator.geolocation.clearWatch(watchId);if(!best){setError('Unable to get a fresh GPS position. Turn on Windows Location Services and allow Chrome to access your location, then try again.');setGpsLoading(false);return;}const accuracy_m=Math.round(best.coords.accuracy);const x={name:'Detecting your exact current location...',lat:best.coords.latitude,lon:best.coords.longitude,accuracy_m};setAccuracy(accuracy_m);try{const r=await fetch(API+'/reverse-geocode',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({lat:x.lat,lon:x.lon})});const d=await r.json();if(!r.ok)throw Error(d.error||'Could not identify your location');x.name=d.name||'Current Location';setQ(x.name);setResults([]);onSelect(x)}catch(e){setError(e.message||'Could not identify your current location.');onSelect(null)}finally{setGpsLoading(false)}};const onPos=p=>{if(!best||p.coords.accuracy<best.coords.accuracy)best=p;setAccuracy(Math.round(p.coords.accuracy));if(best.coords.accuracy<=30)finish();};watchId=navigator.geolocation.watchPosition(onPos,e=>{if(e.code===1)setError('Location permission was blocked. Click Chrome location icon and allow access.');else setError('Unable to detect your current GPS location. Check Windows Location Services and Chrome location permission.');}, {enableHighAccuracy:true,timeout:20000,maximumAge:0});setTimeout(finish,6000)};
+ return <div className={`loc ${results.length>0 ? 'loc-open' : ''}`}><label>{label}</label><div className="searchrow"><input value={q} onChange={onChange} onKeyDown={e=>e.key==='Enter'&&search()} placeholder={placeholder}/><button type="button" className="secondary" onClick={()=>search()} disabled={loading}>{loading?'Searching...':'Search'}</button>{allowCurrent&&<button type="button" className="secondary" onClick={gps} disabled={gpsLoading}>{gpsLoading?'Detecting...':'📍 Use Current Location'}</button>}</div>{results.length>0&&<div className="suggestions"><div className="google-attribution"><img src="https://www.gstatic.com/images/branding/googlelogo/1x/googlelogo_color_74x24dp.png" alt="Google"/></div>{results.map((x,i)=><button type="button" key={i} onClick={()=>choose(x)}><span>📍</span><span><b>{x.main||shortName(x.name)}</b><small>{x.secondary||x.name}</small></span></button>)}</div>}{value&&<div className="selected">✓ Location selected{value.accuracy_m?` · GPS accuracy ±${value.accuracy_m} m`:''}</div>}{error&&<div className="error">{error}</div>}</div>
 }
 function shortName(s){return (s||'').split(',')[0]||s}
 function decodePolyline(encoded,precision=5){let index=0,lat=0,lng=0,points=[];const factor=10**precision;while(index<encoded.length){let b,shift=0,result=0;do{b=encoded.charCodeAt(index++)-63;result|=(b&31)<<shift;shift+=5}while(b>=32);lat+=result&1?~(result>>1):(result>>1);shift=0;result=0;do{b=encoded.charCodeAt(index++)-63;result|=(b&31)<<shift;shift+=5}while(b>=32);lng+=result&1?~(result>>1):(result>>1);points.push([lat/factor,lng/factor])}return points}
@@ -323,34 +237,21 @@ function GoogleNavigationMap({route,from,to,onClose}){
     mapRef.current=map;
     const bounds=new window.google.maps.LatLngBounds();
     bounds.extend({lat:Number(from.lat),lng:Number(from.lon)});bounds.extend({lat:Number(to.lat),lng:Number(to.lon)});
-    // IMPORTANT: every route object is normalized to its own `path` before it
-    // reaches this component. Always render that exact selected path first.
-    // Previously, fallback routes ignored their normalized path and decoded the
-    // provider polyline again, which could make different route cards appear on
-    // the same map path.
-    let selectedPath=Array.isArray(route?.path)?route.path:[];
-    if(!selectedPath.length && route?.polyline){
-      const pts=decodePolyline(route.polyline,route.polyline_precision||5);
-      selectedPath=pts.map(([lat,lng])=>({lat,lng}));
+    if(route.provider==='google_js_routes' && route.path?.length){
+      routeLineRef.current=new window.google.maps.Polyline({map,path:route.path,strokeOpacity:0.95,strokeWeight:7});
+      route.path.forEach(p=>bounds.extend(p));
+      new window.google.maps.Marker({position:{lat:Number(from.lat),lng:Number(from.lon)},map,label:'A',title:'Start'});
+      new window.google.maps.Marker({position:{lat:Number(to.lat),lng:Number(to.lon)},map,label:'B',title:'Destination'});
+      map.fitBounds(bounds,50);setStatus(route.traffic_aware ? 'Selected traffic-aware route loaded. Live location is being tracked.' : 'Selected fallback road route loaded. Live location is being tracked.');
+    }else{
+      const pts=route?.polyline?decodePolyline(route.polyline,route.polyline_precision||5):[];
+      if(!pts.length)throw new Error('This route has no map path to display.');
+      const path=pts.map(([lat,lng])=>({lat,lng}));path.forEach(p=>bounds.extend(p));
+      routeLineRef.current=new window.google.maps.Polyline({path,geodesic:true,strokeColor:'#1769e0',strokeOpacity:0.95,strokeWeight:7,map});
+      new window.google.maps.Marker({position:{lat:Number(from.lat),lng:Number(from.lon)},map,label:'A',title:'Start'});
+      new window.google.maps.Marker({position:{lat:Number(to.lat),lng:Number(to.lon)},map,label:'B',title:'Destination'});
+      map.fitBounds(bounds,50);setStatus(route.traffic_aware ? 'Traffic-aware route loaded on Google Maps. Live location is being tracked.' : 'Fallback road route loaded on Google Maps. Live location is being tracked.');
     }
-    selectedPath=selectedPath
-      .map(p=>({lat:Number(p.lat??p[0]),lng:Number(p.lng??p[1])}))
-      .filter(p=>Number.isFinite(p.lat)&&Number.isFinite(p.lng));
-    if(!selectedPath.length)throw new Error('This route has no map path to display.');
-
-    selectedPath.forEach(p=>bounds.extend(p));
-    routeLineRef.current=new window.google.maps.Polyline({
-      map,
-      path:selectedPath,
-      geodesic:true,
-      strokeColor:'#1769e0',
-      strokeOpacity:0.95,
-      strokeWeight:7
-    });
-    new window.google.maps.Marker({position:{lat:Number(from.lat),lng:Number(from.lon)},map,label:'A',title:'Start'});
-    new window.google.maps.Marker({position:{lat:Number(to.lat),lng:Number(to.lon)},map,label:'B',title:'Destination'});
-    map.fitBounds(bounds,50);
-    setStatus(route.traffic_aware ? 'Selected traffic-aware route loaded. Live location is being tracked.' : 'Selected road route loaded. Live location is being tracked.');
     const update=pos=>{const p={lat:pos.coords.latitude,lng:pos.coords.longitude};setLive({lat:p.lat,lon:p.lng,accuracy:Math.round(pos.coords.accuracy)});if(!userMarkerRef.current){userMarkerRef.current=new window.google.maps.Marker({position:p,map,label:'●',title:'Your live location'});}else userMarkerRef.current.setPosition(p);if(follow)map.panTo(p);};
     if(navigator.geolocation)watchRef.current=navigator.geolocation.watchPosition(update,()=>setStatus('Google Map loaded. Live location permission is unavailable.'),{enableHighAccuracy:true,maximumAge:3000,timeout:15000});
    }catch(e){if(!cancelled)setStatus(e.message||'Could not load Google Maps.');}
@@ -420,7 +321,7 @@ function SmartRoute({nav}){
    }
   }catch(e){setMsg(e.message||'Routing failed.')}finally{setBusy(false)}
  };
- return <section className="page visual-page visual-route"><Back nav={nav}/><div className="section-head"><p className="eyebrow">SMART ROUTE</p><h2>Plan your route</h2></div><LocationPicker label="From Location" value={from} onSelect={x=>{setFrom(x);setRoutes([]);setActiveRoute(null)}} placeholder="Search source location..." allowCurrent/><LocationPicker label="To Location" value={to} onSelect={x=>{setTo(x);setRoutes([]);setActiveRoute(null)}} placeholder="Search destination..."/><div className="action-row"><button className="primary" onClick={calculate} disabled={busy}>{busy?'Finding routes...':'Calculate Available Routes'}</button></div>{msg&&<div className="notice">{msg}</div>}{routes.length>0&&<div className="routes-heading"><h3>Available Routes ({routes.length})</h3><span>Distinct actual road paths · up to 15</span></div>}<div className="route-list">{routes.map(r=><div className={`route-card ${r.recommended?'recommended':''} ${activeRoute?.id===r.id?'selected-route':''}`} key={`${r.provider}-${r.id}`}><div className="route-title"><div><b>Route {r.id}</b>{r.recommended&&<span className="recommended-badge">⭐ RECOMMENDED</span>}</div><span>{r.score}/100</span></div><div className="stats"><span>📏 {r.distance_km} km</span><span>⏱️ {r.duration_min} min</span><span>🚦 {r.traffic}</span></div>{r.route_label&&<p className="small">Road: {r.route_label}</p>}<p className="recommendation">{r.recommendation}</p>{r.traffic_aware&&<p className="small traffic-source">🚦 Traffic-aware ETA: {r.duration_min} min · Normal ETA: {r.static_duration_min ?? r.duration_min} min{r.traffic_delay_min!=null?` · Delay: +${r.traffic_delay_min} min`:''}</p>}<button type="button" className="secondary view-route-btn" onClick={()=>setActiveRoute(r)}>View Route</button>{activeRoute?.id===r.id&&from&&to&&<GoogleNavigationMap key={`route-map-${r.provider}-${r.id}`} route={r} from={from} to={to} onClose={()=>setActiveRoute(null)}/>}</div>)}</div></section>
+ return <section className="page visual-page visual-route"><Back nav={nav}/><div className="section-head"><p className="eyebrow">SMART ROUTE</p><h2>Plan your route</h2></div><LocationPicker label="From Location" value={from} onSelect={x=>{setFrom(x);setRoutes([]);setActiveRoute(null)}} placeholder="Search source location..." allowCurrent/><LocationPicker label="To Location" value={to} onSelect={x=>{setTo(x);setRoutes([]);setActiveRoute(null)}} placeholder="Search destination..."/><div className="action-row"><button className="primary" onClick={calculate} disabled={busy}>{busy?'Finding routes...':'Calculate Available Routes'}</button></div>{msg&&<div className="notice">{msg}</div>}{routes.length>0&&<div className="routes-heading"><h3>Available Routes ({routes.length})</h3><span>Distinct actual road paths · up to 15</span></div>}<div className="route-list">{routes.map(r=><div className={`route-card ${r.recommended?'recommended':''} ${activeRoute?.id===r.id?'selected-route':''}`} key={`${r.provider}-${r.id}`}><div className="route-title"><div><b>Route {r.id}</b>{r.recommended&&<span className="recommended-badge">⭐ RECOMMENDED</span>}</div><span>{r.score}/100</span></div><div className="stats"><span>📏 {r.distance_km} km</span><span>⏱️ {r.duration_min} min</span><span>🚦 {r.traffic}</span></div>{r.route_label&&<p className="small">Road: {r.route_label}</p>}<p className="recommendation">{r.recommendation}</p>{r.traffic_aware&&<p className="small traffic-source">🚦 Traffic-aware ETA: {r.duration_min} min · Normal ETA: {r.static_duration_min ?? r.duration_min} min{r.traffic_delay_min!=null?` · Delay: +${r.traffic_delay_min} min`:''}</p>}<button type="button" className="secondary view-route-btn" onClick={()=>setActiveRoute(r)}>View Route</button>{activeRoute?.id===r.id&&from&&to&&<GoogleNavigationMap route={r} from={from} to={to} onClose={()=>setActiveRoute(null)}/>}</div>)}</div></section>
 }
 
 function NearbyRouteMap({loc,focus,title,onClose}){
